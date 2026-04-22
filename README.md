@@ -255,6 +255,4 @@ Never commit directly to `main`. Always open a PR from a feature branch.
 
 ---
 
-## License
 
-MIT — build on this freely, but give credit.
