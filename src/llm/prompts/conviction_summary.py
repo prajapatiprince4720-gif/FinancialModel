@@ -12,7 +12,12 @@ def build_conviction_query(
     company_name: str,
     fundamental_analysis: str,
     scenario_analysis: str,
+    sentiment_analysis: str = "",
 ) -> str:
+    sentiment_block = (
+        f"\n=== NEWS & SENTIMENT ===\n{sentiment_analysis[:1000]}\n"
+        if sentiment_analysis else ""
+    )
     return f"""Based on the following institutional research on {company_name} ({ticker}), write a plain-English conviction summary for a retail investor.
 
 === FUNDAMENTAL ANALYSIS ===
@@ -20,6 +25,7 @@ def build_conviction_query(
 
 === SCENARIO ANALYSIS ===
 {scenario_analysis[:2000]}
+{sentiment_block}
 
 === YOUR TASK ===
 

@@ -20,9 +20,11 @@ class ScenarioAgent(BaseAgent):
         "income_statement",
         "cash_flow",
         "news",
-        "earnings_transcript",
+        "screener_profit_loss",
+        "screener_cash_flow",
+        "screener_ratios",
     ]
-    top_k_per_section = 3
+    top_k_per_section = 5
 
     def run(
         self,

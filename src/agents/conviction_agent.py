@@ -26,12 +26,13 @@ class ConvictionAgent:
         company_name: str,
         fundamental_analysis: str,
         scenario_analysis: str,
+        sentiment_analysis: str = "",
         **kwargs: Any,
     ) -> str:
         logger.info(f"[ConvictionAgent] Running for {ticker}")
 
         user_message = build_conviction_query(
-            ticker, company_name, fundamental_analysis, scenario_analysis
+            ticker, company_name, fundamental_analysis, scenario_analysis, sentiment_analysis
         )
         result = self.llm.complete(
             system_prompt=CONVICTION_SYSTEM_PROMPT,

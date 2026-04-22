@@ -17,6 +17,7 @@ from config.nifty50_tickers import NIFTY50_TICKERS
 from src.agents.router_agent import RouterAgent
 from src.agents.multi_stock_agent import MultiStockAgent
 from src.agents.investment_agent import InvestmentAgent
+from src.agents.investor_qa_agent import InvestorQAAgent
 from src.llm import get_llm_client
 from src.rag.retriever import Retriever
 from src.utils.logger import get_logger
@@ -47,6 +48,7 @@ class ChatAgent:
         self.router = RouterAgent()
         self.multi_stock = MultiStockAgent()
         self.investment = InvestmentAgent()
+        self.investor_qa = InvestorQAAgent()
         self.history: list[dict[str, str]] = []
 
     def ask(self, user_message: str) -> str:
@@ -71,7 +73,7 @@ class ChatAgent:
                 )
 
         elif route.intent == "concept":
-            response = self._handle_concept(user_message)
+            response = self.investor_qa.ask(user_message)
 
         elif route.intent == "investment_sim":
             ticker = f"{route.tickers[0]}.NS" if route.tickers else None

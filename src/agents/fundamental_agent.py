@@ -21,8 +21,13 @@ class FundamentalAgent(BaseAgent):
         "income_statement",
         "balance_sheet",
         "cash_flow",
+        "screener_profit_loss",
+        "screener_balance_sheet",
+        "screener_cash_flow",
+        "screener_ratios",
+        "screener_peers",
     ]
-    top_k_per_section = 3
+    top_k_per_section = 5
 
     def run(self, ticker: str, company_name: str, question: str = "", **kwargs: Any) -> str:
         logger.info(f"[FundamentalAgent] Running for {ticker}")

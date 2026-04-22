@@ -16,8 +16,8 @@ from typing import Any
 
 from config.settings import get_settings
 from config.nifty50_tickers import NIFTY50_TICKERS
-from src.data_pipeline.fetchers import YFinanceFetcher, NewsFetcher, NSEFetcher
-from src.data_pipeline.processors import FinancialProcessor, TextProcessor
+from src.data_pipeline.fetchers import YFinanceFetcher, NewsFetcher, NSEFetcher, ScreenerFetcher
+from src.data_pipeline.processors import FinancialProcessor, TextProcessor, ScreenerProcessor
 from src.utils.logger import get_logger
 from src.utils.helpers import ensure_dir
 
@@ -35,8 +35,10 @@ class DataPipeline:
         self.yf_fetcher = YFinanceFetcher()
         self.news_fetcher = NewsFetcher()
         self.nse_fetcher = NSEFetcher()
+        self.screener_fetcher = ScreenerFetcher()
         self.fin_processor = FinancialProcessor()
         self.text_processor = TextProcessor()
+        self.screener_processor = ScreenerProcessor()
         ensure_dir(settings.processed_data_dir)
 
     def run(self, ticker_yf: str) -> list[dict[str, str]]:
@@ -61,12 +63,21 @@ class DataPipeline:
         news_raw = self.news_fetcher.fetch(company_name, ticker_yf, days_back=60)
         all_chunks += self.text_processor.process_news({"ticker": ticker_yf, "articles": news_raw})
 
-        # 3. NSE data (best-effort — may fail if NSE blocks)
-        logger.info("Step 3/3: Fetching NSE corporate actions")
+        # 3. NSE data (best-effort — NSE frequently blocks automated requests)
         try:
             self.nse_fetcher.fetch_corporate_actions(nse_symbol)
+        except Exception:
+            pass  # silently skip — NSE blocks are expected
+
+        # 4. Screener.in — 10 years of financials (best-effort)
+        logger.info("Step 4/4: Fetching 10-year data from Screener.in")
+        try:
+            screener_raw = self.screener_fetcher.fetch(nse_symbol)
+            screener_chunks = self.screener_processor.process(screener_raw)
+            all_chunks += screener_chunks
+            logger.info(f"Screener.in added {len(screener_chunks)} chunks for {ticker_yf}")
         except Exception as exc:
-            logger.warning(f"NSE fetch skipped: {exc}")
+            logger.warning(f"Screener fetch skipped for {ticker_yf}: {exc}")
 
         # Save processed chunks
         self._save_chunks(ticker_yf, all_chunks)

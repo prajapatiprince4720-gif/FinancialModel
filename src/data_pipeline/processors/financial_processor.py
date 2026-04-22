@@ -25,16 +25,48 @@ class FinancialProcessor:
         Each dict is one chunk ready for embedding.
         """
         ticker = raw_data.get("ticker", "UNKNOWN")
+        info = raw_data.get("info", {})
         chunks: list[dict[str, str]] = []
 
-        chunks.append(self._process_company_profile(ticker, raw_data.get("info", {})))
+        chunks.append(self._process_company_profile(ticker, info))
         chunks.append(self._process_key_ratios(ticker, raw_data.get("key_ratios", {})))
         chunks += self._process_income_statement(ticker, raw_data.get("income_statement", {}))
         chunks += self._process_balance_sheet(ticker, raw_data.get("balance_sheet", {}))
         chunks += self._process_cash_flow(ticker, raw_data.get("cash_flow", {}))
 
+        # When yfinance returns no financial statements (known bug for some Indian stocks),
+        # build a fallback chunk from the info dict so the stock isn't left empty
+        if not raw_data.get("income_statement") and info:
+            chunks.append(self._process_info_fallback(ticker, info))
+
         # Filter empty chunks
         return [c for c in chunks if c.get("text", "").strip()]
+
+    def _process_info_fallback(self, ticker: str, info: dict[str, Any]) -> dict[str, str]:
+        """Fallback chunk when yfinance financial statements are unavailable."""
+        lines = [f"Available Financial Data — {ticker} (from Yahoo Finance info):"]
+        fields = {
+            "marketCap": ("Market Cap", lambda v: f"₹{v/1e7:,.0f} Cr"),
+            "totalRevenue": ("Total Revenue (TTM)", lambda v: f"₹{v/1e7:,.0f} Cr"),
+            "netIncomeToCommon": ("Net Income (TTM)", lambda v: f"₹{v/1e7:,.0f} Cr"),
+            "ebitda": ("EBITDA", lambda v: f"₹{v/1e7:,.0f} Cr"),
+            "totalDebt": ("Total Debt", lambda v: f"₹{v/1e7:,.0f} Cr"),
+            "totalCash": ("Total Cash", lambda v: f"₹{v/1e7:,.0f} Cr"),
+            "freeCashflow": ("Free Cash Flow", lambda v: f"₹{v/1e7:,.0f} Cr"),
+            "trailingPE": ("P/E Ratio", lambda v: f"{v:.2f}x"),
+            "returnOnEquity": ("ROE", lambda v: f"{v*100:.1f}%"),
+            "revenueGrowth": ("Revenue Growth (YoY)", lambda v: f"{v*100:.1f}%"),
+        }
+        has_data = False
+        for key, (label, fmt) in fields.items():
+            val = safe_float(info.get(key))
+            if val:
+                lines.append(f"  {label}: {fmt(val)}")
+                has_data = True
+        if not has_data:
+            return {"text": "", "ticker": ticker, "section": "info_fallback", "period": "current"}
+        lines.append("  Note: Detailed annual statements unavailable from Yahoo Finance for this ticker.")
+        return {"text": "\n".join(lines), "ticker": ticker, "section": "info_fallback", "period": "current"}
 
     # ──────────────────────────────────────────────────────────────────────────
 

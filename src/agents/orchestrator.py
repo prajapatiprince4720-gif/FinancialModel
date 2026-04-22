@@ -19,9 +19,12 @@ Usage (Python):
 import argparse
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+
+import yfinance as yf
 
 from src.agents.fundamental_agent import FundamentalAgent
 from src.agents.sentiment_agent import SentimentAgent
@@ -149,34 +152,41 @@ class ResearchOrchestrator:
         logger.info(f"Research Report: {company_name} ({ticker_yf})")
         logger.info(f"{'='*60}")
 
+        # Fetch current price to anchor scenario targets
+        current_price = self._get_current_price(ticker_yf)
+        price_note = f"Current market price: ₹{current_price:,.2f}" if current_price else ""
+
         report = ResearchReport(
             ticker=ticker_yf,
             company_name=company_name,
             generated_at=datetime.utcnow().isoformat(),
+            metadata={"current_price": current_price},
         )
 
-        # Step 1: Fundamental analysis
-        logger.info("[1/4] Running Fundamental Analysis...")
-        report.fundamental_analysis = self.fundamental_agent.run(
-            ticker=ticker_yf,
-            company_name=company_name,
-            question=question,
-        )
+        # Steps 1 & 2 run in parallel (independent of each other)
+        logger.info("[1+2/4] Running Fundamental + Sentiment in parallel...")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_fundamental = pool.submit(
+                self.fundamental_agent.run,
+                ticker=ticker_yf,
+                company_name=company_name,
+                question=question,
+            )
+            fut_sentiment = pool.submit(
+                self.sentiment_agent.run,
+                ticker=ticker_yf,
+                company_name=company_name,
+            )
+            report.fundamental_analysis = fut_fundamental.result()
+            report.sentiment_analysis = fut_sentiment.result()
 
-        # Step 2: Sentiment analysis
-        logger.info("[2/4] Running Sentiment Analysis...")
-        report.sentiment_analysis = self.sentiment_agent.run(
-            ticker=ticker_yf,
-            company_name=company_name,
-        )
-
-        # Step 3: Scenario building (informed by fundamentals)
+        # Step 3: Scenario building (uses full fundamental context + current price)
         logger.info("[3/4] Building Investment Scenarios...")
         report.scenario_analysis = self.scenario_agent.run(
             ticker=ticker_yf,
             company_name=company_name,
             horizon=horizon,
-            fundamental_context=report.fundamental_analysis[:2000],
+            fundamental_context=f"{price_note}\n\n{report.fundamental_analysis}" if price_note else report.fundamental_analysis,
         )
 
         # Step 4: Conviction summary for retail investors
@@ -186,6 +196,7 @@ class ResearchOrchestrator:
             company_name=company_name,
             fundamental_analysis=report.fundamental_analysis,
             scenario_analysis=report.scenario_analysis,
+            sentiment_analysis=report.sentiment_analysis,
         )
 
         logger.info("Research complete.")
@@ -195,6 +206,13 @@ class ResearchOrchestrator:
             report.metadata["saved_to"] = path
 
         return report
+
+    def _get_current_price(self, ticker_yf: str) -> float | None:
+        try:
+            info = yf.Ticker(ticker_yf).fast_info
+            return float(info.last_price)
+        except Exception:
+            return None
 
     def quick_answer(self, ticker_yf: str, question: str) -> str:
         """
