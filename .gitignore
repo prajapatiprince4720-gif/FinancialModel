@@ -1,0 +1,59 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+venv/
+env/
+.venv/
+ENV/
+
+# Data (raw data is never committed — use DVC or document manually)
+data/raw/*
+data/processed/*
+data/vector_store/*
+*.csv
+*.parquet
+# Allow .gitkeep files to preserve directory structure
+!data/**/.gitkeep
+*.json
+!config/*.json
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/settings.json
+.vscode/launch.json
+.vscode/*.code-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+logs/
+*.log
+
+# ChromaDB persisted store
+chroma_db/
+
+# Pytest cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# MyPy
+.mypy_cache/
