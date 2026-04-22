@@ -94,6 +94,16 @@ def cmd_ask(args):
     print(answer)
 
 
+def cmd_chart(args):
+    from src.charts.price_chart import PriceChart
+    ticker = args.ticker
+    print(f"\nFetching price data for {ticker} across 6 timeframes...")
+    print("This takes about 15 seconds — downloading 1D, 1W, 1M, 1Y, 5Y, 10Y data\n")
+    path = PriceChart().plot(ticker)
+    print(f"\nChart saved → {path}")
+    print("Opening chart...")
+
+
 def cmd_chat(args):
     from src.agents.chat_agent import ChatAgent
     agent = ChatAgent()
@@ -181,6 +191,11 @@ def main():
     p_ask.add_argument("--ticker", type=str, required=True)
     p_ask.add_argument("--question", type=str, required=True)
     p_ask.set_defaults(func=cmd_ask)
+
+    # ── chart ──
+    p_chart = subparsers.add_parser("chart", help="Generate 6-panel price chart (1D/1W/1M/1Y/5Y/10Y)")
+    p_chart.add_argument("--ticker", type=str, required=True, help="e.g. RELIANCE.NS")
+    p_chart.set_defaults(func=cmd_chart)
 
     # ── chat ──
     p_chat = subparsers.add_parser("chat", help="Interactive financial assistant (ask anything)")

@@ -53,7 +53,24 @@ class ChatAgent:
         route = self.router.route(user_message)
         logger.info(f"[Chat] intent={route.intent} tickers={route.tickers} top_n={route.top_n} amount={route.amount}")
 
-        if route.intent == "concept":
+        if route.intent == "chart":
+            if not route.tickers:
+                response = "Which stock would you like a chart for? E.g. 'Show chart for Reliance'"
+            else:
+                ticker = f"{route.tickers[0]}.NS"
+                company = NIFTY50_TICKERS.get(route.tickers[0], route.tickers[0])
+                print(f"  Generating 6-panel price chart for {company}...")
+                from src.charts.price_chart import PriceChart
+                path = PriceChart().plot(ticker)
+                response = (
+                    f"Chart generated for **{company}** ({ticker})\n"
+                    f"Saved to: `{path}`\n\n"
+                    f"The chart shows 6 timeframes: 1 Day · 1 Week · 1 Month · 1 Year · 5 Years · 10 Years\n"
+                    f"Each panel shows the closing price as a line graph with colour indicating direction "
+                    f"(green = up, red = down) and the % change for that period."
+                )
+
+        elif route.intent == "concept":
             response = self._handle_concept(user_message)
 
         elif route.intent == "investment_sim":

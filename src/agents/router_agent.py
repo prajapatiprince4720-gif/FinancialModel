@@ -30,6 +30,7 @@ Intent definitions:
 - market_overview: top N / leading / best / largest stocks by some criteria
 - investment_sim: "what if I invest X amount" or "if I put X in Y" scenarios
 - full_research: wants complete research report on a stock
+- chart: user wants to see a price chart / graph / price history for a stock
 - general: greetings or unrelated questions
 
 Rules:
