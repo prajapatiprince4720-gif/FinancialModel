@@ -1,5 +1,7 @@
+import os
 from functools import lru_cache
-from pydantic import Field
+
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,7 +17,7 @@ class Settings(BaseSettings):
     claude_model: str = "claude-sonnet-4-6"
     claude_max_tokens: int = 4096
 
-    # News
+    # News (optional — falls back to free RSS feeds when blank)
     news_api_key: str = Field(default="", description="NewsAPI.org key")
     alpha_vantage_api_key: str = Field(default="", description="Alpha Vantage key")
 
@@ -39,6 +41,30 @@ class Settings(BaseSettings):
 
     # RAG retrieval
     retrieval_top_k: int = 8
+
+    @field_validator("news_api_key", "alpha_vantage_api_key", mode="before")
+    @classmethod
+    def _strip_placeholders(cls, v: str) -> str:
+        """Treat unfilled placeholder values as empty so optional features skip gracefully."""
+        if not v:
+            return ""
+        v = str(v).strip()
+        if v.startswith("your_") or v.endswith("_here") or v in ("sk-ant-...",):
+            return ""
+        return v
+
+    @model_validator(mode="after")
+    def _ensure_data_dirs(self) -> "Settings":
+        """Create required data directories on first import so fetchers never hit FileNotFoundError."""
+        for path in (
+            self.processed_data_dir,
+            os.path.join(self.raw_data_dir, "financials"),
+            os.path.join(self.raw_data_dir, "news"),
+            self.chroma_persist_dir,
+            "reports",
+        ):
+            os.makedirs(path, exist_ok=True)
+        return self
 
 
 @lru_cache(maxsize=1)
