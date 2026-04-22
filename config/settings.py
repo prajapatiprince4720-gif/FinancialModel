@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     claude_model: str = "claude-sonnet-4-6"
     claude_max_tokens: int = 4096
 
+    # LLM provider — "groq" (free) or "claude" (requires credits)
+    llm_provider: str = "groq"
+    groq_api_key: str = Field(default="", description="Groq API key (free at console.groq.com)")
+    groq_model: str = "llama-3.3-70b-versatile"
+
     # News (optional — falls back to free RSS feeds when blank)
     news_api_key: str = Field(default="", description="NewsAPI.org key")
     alpha_vantage_api_key: str = Field(default="", description="Alpha Vantage key")
@@ -42,7 +47,7 @@ class Settings(BaseSettings):
     # RAG retrieval
     retrieval_top_k: int = 8
 
-    @field_validator("news_api_key", "alpha_vantage_api_key", mode="before")
+    @field_validator("news_api_key", "alpha_vantage_api_key", "groq_api_key", mode="before")
     @classmethod
     def _strip_placeholders(cls, v: str) -> str:
         """Treat unfilled placeholder values as empty so optional features skip gracefully."""

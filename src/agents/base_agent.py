@@ -13,7 +13,7 @@ Subclasses override: system_prompt, sections_to_retrieve, run()
 from abc import ABC, abstractmethod
 from typing import Any
 
-from src.llm.claude_client import ClaudeClient
+from src.llm import get_llm_client
 from src.rag.retriever import Retriever
 from src.utils.logger import get_logger
 
@@ -31,10 +31,10 @@ class BaseAgent(ABC):
     def __init__(
         self,
         retriever: Retriever | None = None,
-        llm: ClaudeClient | None = None,
+        llm: Any | None = None,
     ) -> None:
         self.retriever = retriever or Retriever()
-        self.llm = llm or ClaudeClient()
+        self.llm = llm or get_llm_client()
 
     @abstractmethod
     def run(self, ticker: str, company_name: str, **kwargs: Any) -> str:

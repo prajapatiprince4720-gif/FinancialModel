@@ -94,6 +94,51 @@ def cmd_ask(args):
     print(answer)
 
 
+def cmd_chat(args):
+    from src.agents.chat_agent import ChatAgent
+    agent = ChatAgent()
+
+    print("\n" + "="*60)
+    print("  EquityLens AI — Interactive Financial Assistant")
+    print("  Nifty 50 | Powered by Llama 3 via Groq")
+    print("="*60)
+    print("  Ask anything about Indian stocks, investing, or finance.")
+    print("  Examples:")
+    print("    > What is P/E ratio?")
+    print("    > Give me top 8 Nifty companies by market cap")
+    print("    > What if I invest ₹1000 in Reliance right now?")
+    print("    > Compare TCS and Infosys")
+    print("    > Full research report on HDFC Bank")
+    print("    > Which Nifty stocks have the lowest P/E?")
+    print("  Type 'exit' or 'quit' to stop. Type 'clear' to reset history.")
+    print("="*60 + "\n")
+
+    while True:
+        try:
+            user_input = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            break
+
+        if not user_input:
+            continue
+        if user_input.lower() in ("exit", "quit", "bye"):
+            print("Goodbye!")
+            break
+        if user_input.lower() == "clear":
+            agent.clear_history()
+            print("  [Conversation history cleared]\n")
+            continue
+
+        print("\nEquityLens: thinking...\n")
+        try:
+            response = agent.ask(user_input)
+            print(f"EquityLens:\n{response}\n")
+            print("-" * 60 + "\n")
+        except Exception as exc:
+            print(f"  Error: {exc}\n")
+
+
 def cmd_status(args):
     from src.rag.vector_store import VectorStore
     store = VectorStore()
@@ -136,6 +181,10 @@ def main():
     p_ask.add_argument("--ticker", type=str, required=True)
     p_ask.add_argument("--question", type=str, required=True)
     p_ask.set_defaults(func=cmd_ask)
+
+    # ── chat ──
+    p_chat = subparsers.add_parser("chat", help="Interactive financial assistant (ask anything)")
+    p_chat.set_defaults(func=cmd_chat)
 
     # ── status ──
     p_status = subparsers.add_parser("status", help="Show knowledge base status")

@@ -27,7 +27,7 @@ from src.agents.fundamental_agent import FundamentalAgent
 from src.agents.sentiment_agent import SentimentAgent
 from src.agents.scenario_agent import ScenarioAgent
 from src.agents.conviction_agent import ConvictionAgent
-from src.llm.claude_client import ClaudeClient
+from src.llm import get_llm_client
 from src.rag.retriever import Retriever
 from config.nifty50_tickers import NIFTY50_TICKERS
 from config.settings import get_settings
@@ -116,7 +116,7 @@ class ResearchOrchestrator:
 
     def __init__(self) -> None:
         self.retriever = Retriever()
-        self.llm = ClaudeClient()
+        self.llm = get_llm_client()
 
         self.fundamental_agent = FundamentalAgent(retriever=self.retriever, llm=self.llm)
         self.sentiment_agent = SentimentAgent(retriever=self.retriever, llm=self.llm)
