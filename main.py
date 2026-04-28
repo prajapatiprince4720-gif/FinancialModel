@@ -134,15 +134,17 @@ def cmd_dataset(args):
     from src.reports.dataset_report import (
         build_dataset, print_valuation_table,
         print_pl_income_table, print_pl_cost_table,
-        print_cashflow_table, print_pl_trend, save_csv,
+        print_cashflow_table, print_pl_trend,
+        print_profit_mcap_table, save_csv,
     )
 
     print("\nLoading data for all 50 Nifty 50 companies from cache...")
     rows = build_dataset()
 
     if args.symbol:
-        # Single company 5-year trend
         print_pl_trend(rows, args.symbol.upper().replace(".NS", ""))
+    elif args.profit:
+        print_profit_mcap_table(rows, args.year or "2025")
     elif args.pl:
         year = args.year or "2025"
         print_pl_income_table(rows, year)
@@ -160,6 +162,139 @@ def cmd_dataset(args):
     # Always save CSV
     csv_path = save_csv(rows)
     print(f"  Dataset saved → {csv_path}\n")
+
+
+def cmd_dcf(args):
+    """Run DCF valuation engine on all 50 companies."""
+    from src.valuation.dcf_engine import DCFEngine
+    from src.reports.advanced_report import print_dcf_table
+    from config.nifty50_tickers import NIFTY50_TICKERS
+
+    symbols = list(NIFTY50_TICKERS.keys())
+    if args.ticker:
+        sym = args.ticker.upper().replace(".NS", "")
+        symbols = [sym] if sym in NIFTY50_TICKERS else symbols
+
+    engine = DCFEngine()
+    print(f"\nRunning DCF valuation on {len(symbols)} companies (10,000 Monte Carlo simulations each)...")
+
+    results = []
+    for sym in symbols:
+        r = engine.value(sym)
+        results.append(r)
+        if args.verbose and r.intrinsic_value > 0:
+            mos = f"{r.margin_of_safety*100:+.1f}%" if r.margin_of_safety is not None else "N/A"
+            print(f"  {sym:15s}  IV: ₹{r.intrinsic_value:,.0f}  MoS: {mos}  [{r.verdict}]")
+
+    print_dcf_table(results)
+
+
+def cmd_score(args):
+    """Multi-factor composite score for all Nifty 50 companies."""
+    from src.scoring.composite_score import CompositeScorer
+    from src.reports.advanced_report import print_score_table, print_sector_ranking
+    from config.nifty50_tickers import NIFTY50_TICKERS
+
+    symbols = list(NIFTY50_TICKERS.keys())
+    print(f"\nComputing multi-factor composite scores for {len(symbols)} companies...")
+
+    scorer  = CompositeScorer()
+    results = scorer.score_all(symbols)
+
+    if args.sector:
+        print_sector_ranking(results)
+    else:
+        print_score_table(results)
+
+
+def cmd_pdf(args):
+    """Generate a professional PDF equity research report for one company."""
+    from src.valuation.dcf_engine      import DCFEngine
+    from src.scoring.composite_score   import CompositeScorer
+    from src.reports.pdf_report        import generate_pdf
+    from config.nifty50_tickers        import NIFTY50_TICKERS
+
+    sym = args.ticker.upper().replace(".NS", "")
+    company = NIFTY50_TICKERS.get(sym, sym)
+
+    print(f"\nGenerating PDF research report for {company} ({sym})...")
+
+    dcf_result   = DCFEngine().value(sym)
+    scorer       = CompositeScorer()
+    score_list   = scorer.score_all(list(NIFTY50_TICKERS.keys()))
+    score_result = next((r for r in score_list if r.symbol == sym), None)
+
+    ai_thesis = ""
+    if not args.no_ai:
+        try:
+            from src.llm import get_llm_client
+            llm = get_llm_client()
+            prompt = (
+                f"Write a concise 3-paragraph investment thesis for {company} ({sym}), "
+                f"an Indian Nifty 50 company. "
+                f"Composite score: {score_result.composite:.1f}/100 ({score_result.grade}). "
+                f"Revenue CAGR 3Y: {score_result.revenue_cagr_3y:+.1f}%, "
+                f"EPS CAGR 3Y: {score_result.eps_cagr_3y:+.1f}%, "
+                f"ROCE percentile: {score_result.roce_pct:.0f}th, "
+                f"D/E: {score_result.de_ratio:.2f}x. "
+                + (f"DCF IV: ₹{dcf_result.intrinsic_value:,.0f}, MoS: {dcf_result.margin_of_safety*100:+.1f}%. "
+                   if dcf_result and dcf_result.margin_of_safety else "") +
+                "Cover: (1) Business model & competitive moat, (2) Financial quality & growth drivers, "
+                "(3) Valuation assessment & key risks. Keep it factual and data-driven."
+            )
+            ai_thesis = llm.complete(prompt)
+            print("  AI thesis generated.")
+        except Exception as e:
+            print(f"  AI thesis skipped ({e})")
+
+    out = generate_pdf(
+        symbol=sym,
+        company_name=company,
+        dcf_result=dcf_result,
+        score_result=score_result,
+        ai_thesis=ai_thesis,
+        output_dir="reports",
+    )
+    print(f"\n  PDF saved → {out}")
+    print(f"  Open with: open '{out}'\n")
+
+
+def cmd_flows(args):
+    """FII/DII institutional money flow tracker."""
+    from src.data_pipeline.fetchers.fii_dii_fetcher import FIIDIIFetcher
+    from src.reports.advanced_report import print_fii_dii_table
+
+    print("\nFetching FII/DII flow data from NSE...")
+    fetcher = FIIDIIFetcher()
+    summary = fetcher.fetch(force=args.refresh)
+    print_fii_dii_table(summary)
+
+
+def cmd_portfolio(args):
+    """Markowitz portfolio optimiser using composite scores as quality tilt."""
+    from src.scoring.composite_score import CompositeScorer
+    from src.valuation.portfolio_optimizer import PortfolioOptimizer
+    from src.reports.advanced_report import print_portfolio_table
+    from config.nifty50_tickers import NIFTY50_TICKERS
+
+    symbols = list(NIFTY50_TICKERS.keys())
+    capital = args.capital
+
+    print(f"\nScoring all {len(symbols)} companies...")
+    scorer  = CompositeScorer()
+    results = scorer.score_all(symbols)
+    scores  = {r.symbol: r.composite for r in results}
+
+    print(f"Optimising portfolio for ₹{capital:,.0f} across top {args.stocks} stocks (5,000 random portfolios)...")
+    optimizer = PortfolioOptimizer()
+    portfolio = optimizer.optimize(
+        symbols=symbols,
+        scores=scores,
+        capital=capital,
+        max_stocks=args.stocks,
+        min_stocks=min(args.stocks, 5),
+    )
+    print_portfolio_table(portfolio)
 
 
 def cmd_train(args):
@@ -414,6 +549,7 @@ def main():
     p_ds = subparsers.add_parser("dataset", help="Generate P/E + P&L dataset for all 50 Nifty companies")
     p_ds.add_argument("--valuation", action="store_true", help="Show valuation table only (PE, PB, EV/EBITDA, ROE...)")
     p_ds.add_argument("--pl", action="store_true", help="Show P&L table only")
+    p_ds.add_argument("--profit", action="store_true", help="Show net profit + market cap table")
     p_ds.add_argument("--year", type=str, default="2025", help="FY year for P&L table (default: 2025)")
     p_ds.add_argument("--symbol", type=str, default="", help="5-year P&L trend for one company e.g. TCS")
     p_ds.set_defaults(func=cmd_dataset)
@@ -440,6 +576,34 @@ def main():
     # ── status ──
     p_status = subparsers.add_parser("status", help="Show knowledge base status")
     p_status.set_defaults(func=cmd_status)
+
+    # ── dcf ──
+    p_dcf = subparsers.add_parser("dcf", help="DCF intrinsic value + Monte Carlo for all Nifty 50")
+    p_dcf.add_argument("--ticker", type=str, default="", help="Single stock e.g. RELIANCE.NS (default: all 50)")
+    p_dcf.add_argument("--verbose", action="store_true", help="Print per-company progress")
+    p_dcf.set_defaults(func=cmd_dcf)
+
+    # ── score ──
+    p_score = subparsers.add_parser("score", help="Multi-factor composite quality score (0-100) for all Nifty 50")
+    p_score.add_argument("--sector", action="store_true", help="Show sector peer ranking view instead of full leaderboard")
+    p_score.set_defaults(func=cmd_score)
+
+    # ── flows ──
+    p_flows = subparsers.add_parser("flows", help="FII/DII institutional money flow tracker (NSE live data)")
+    p_flows.add_argument("--refresh", action="store_true", help="Force re-fetch from NSE (ignore cache)")
+    p_flows.set_defaults(func=cmd_flows)
+
+    # ── portfolio ──
+    p_port = subparsers.add_parser("portfolio", help="Markowitz portfolio optimizer — max Sharpe from Nifty 50")
+    p_port.add_argument("--capital", type=float, default=100_000, help="Capital to invest in ₹ (default: 1,00,000)")
+    p_port.add_argument("--stocks", type=int, default=10, help="Max number of stocks in portfolio (default: 10)")
+    p_port.set_defaults(func=cmd_portfolio)
+
+    # ── pdf ──
+    p_pdf = subparsers.add_parser("pdf", help="Generate professional PDF equity research report for a stock")
+    p_pdf.add_argument("--ticker", type=str, required=True, help="Stock symbol e.g. TCS or RELIANCE.NS")
+    p_pdf.add_argument("--no-ai", action="store_true", help="Skip AI thesis generation (faster, offline)")
+    p_pdf.set_defaults(func=cmd_pdf)
 
     args = parser.parse_args()
     args.func(args)

@@ -17,10 +17,12 @@ class Settings(BaseSettings):
     claude_model: str = "claude-sonnet-4-6"
     claude_max_tokens: int = 4096
 
-    # LLM provider — "groq" (free) or "claude" (requires credits)
-    llm_provider: str = "groq"
+    # LLM provider — "gemini" | "groq" | "claude"
+    llm_provider: str = "gemini"
     groq_api_key: str = Field(default="", description="Groq API key (free at console.groq.com)")
     groq_model: str = "llama-3.3-70b-versatile"
+    gemini_api_key: str = Field(default="", description="Google Gemini key (free at aistudio.google.com)")
+    gemini_model: str = "gemini-2.0-flash"
 
     # News (optional — falls back to free RSS feeds when blank)
     news_api_key: str = Field(default="", description="NewsAPI.org key")

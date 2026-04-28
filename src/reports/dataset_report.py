@@ -479,6 +479,70 @@ def print_pl_trend(rows: list[dict], symbol: str) -> None:
     print()
 
 
+# TABLE 5 — PROFIT & MARKET CAP SNAPSHOT
+# Total width: 2+11+2+28+2+12+2+10+2+10+2+8+2+7 = 102
+_PM_SYM, _PM_CO  = 11, 28
+_PM_MC,  _PM_NP  = 12, 10
+_PM_NPM, _PM_EPS = 10,  8
+_PM_PE           =  7
+
+def _pm_sep() -> str:
+    w = 2+_PM_SYM+2+_PM_CO+2+_PM_MC+2+_PM_NP+2+_PM_NPM+2+_PM_EPS+2+_PM_PE
+    return "  " + "─" * (w - 2)
+
+def print_profit_mcap_table(rows: list[dict], year: str = "2025") -> None:
+    W = 2+_PM_SYM+2+_PM_CO+2+_PM_MC+2+_PM_NP+2+_PM_NPM+2+_PM_EPS+2+_PM_PE
+    print()
+    print(_b(_c("═" * W)))
+    print(_b(_c(f"  NIFTY 50 — NET PROFIT & MARKET CAP  |  FY{year}  (₹ Crore)")))
+    print(_b(_c("═" * W)))
+    print("  " + _b(
+        _lj("Symbol", _PM_SYM) + "  " + _lj("Company", _PM_CO) + "  " +
+        _rj("Mkt Cap", _PM_MC) + "  " +
+        _rj("Net Profit", _PM_NP) + "  " +
+        _rj("Profit Mgn", _PM_NPM) + "  " +
+        _rj("EPS (₹)", _PM_EPS) + "  " +
+        _rj("PE", _PM_PE)
+    ))
+    print(_pm_sep())
+
+    sorted_rows = sorted(
+        rows,
+        key=lambda x: x.get("Mkt Cap Cr") or 0,
+        reverse=True
+    )
+    rank = 1
+    for r in sorted_rows:
+        np_val  = r.get(f"Net Profit {year}")
+        rev_val = r.get(f"Revenue {year}")
+        npm     = (np_val / rev_val * 100) if np_val and rev_val else None
+        mc      = r.get("Mkt Cap Cr")
+
+        # colour net profit
+        if np_val is None:
+            np_s = _d("—")
+        elif np_val < 0:
+            np_s = _r(f"{np_val:,.0f}")
+        else:
+            np_s = _g(f"{np_val:,.0f}")
+
+        print(
+            f"  " +
+            _lj(r['Symbol'], _PM_SYM) + "  " +
+            _lj(_tr(r['Company'], _PM_CO), _PM_CO) + "  " +
+            _rj(_mc_fmt(mc), _PM_MC) + "  " +
+            _rj(np_s, _PM_NP) + "  " +
+            _rj(_margin_fmt(npm, good=15, warn=8), _PM_NPM) + "  " +
+            _rj(_eps_fmt(r.get(f"EPS {year}")), _PM_EPS) + "  " +
+            _rj(_pe_fmt(r.get("PE")), _PM_PE)
+        )
+        rank += 1
+
+    print(_pm_sep())
+    print(_d(f"  Sorted by Market Cap  |  Net Profit: green = positive  red = loss  |  Profit Mgn: green ≥15%  yellow 8–15%  red <8%"))
+    print()
+
+
 # ── CSV export ────────────────────────────────────────────────────────────────
 def save_csv(rows: list[dict], output_dir: str = "reports") -> str:
     os.makedirs(output_dir, exist_ok=True)
