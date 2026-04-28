@@ -222,11 +222,18 @@ class DCFEngine:
         avg_tax = self._tail_avg(tax_series, 3) / 100 if tax_series else 0.25
         avg_tax = max(0.0, min(avg_tax, 0.40))
 
-        total_equity_cr = (eq_cap[-1] + reserves[-1]) if eq_cap and reserves else 0
-        total_debt_cr   = borr_ser[-1] if borr_ser else 0
-        total_v         = total_equity_cr + total_debt_cr
-        we = total_equity_cr / total_v if total_v > 0 else 0.70
-        wd = total_debt_cr  / total_v if total_v > 0 else 0.30
+        # Market-cap equity weights (academically correct; book equity understates
+        # equity weight for high P/B companies, making WACC artificially low).
+        total_debt_cr = borr_ser[-1] if borr_ser else 0
+        if cmp and cmp > 0 and shares_cr > 0:
+            market_equity_cr = shares_cr * cmp      # Cr shares × ₹/share = ₹ Cr
+        else:
+            # Fallback to book equity when CMP unavailable
+            market_equity_cr = (eq_cap[-1] + reserves[-1]) if eq_cap and reserves else 0
+            notes.append("WACC uses book equity (no CMP available)")
+        total_v = market_equity_cr + total_debt_cr
+        we = market_equity_cr / total_v if total_v > 0 else 0.70
+        wd = total_debt_cr   / total_v if total_v > 0 else 0.30
 
         wacc = we * cost_equity + wd * cost_debt * (1 - avg_tax)
         wacc = max(0.08, min(wacc, 0.20))
