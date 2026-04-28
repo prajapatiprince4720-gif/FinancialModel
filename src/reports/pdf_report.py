@@ -4,7 +4,8 @@ Professional PDF Equity Research Report Generator.
 Generates a Goldman-style 6-page PDF per company with:
   - Cover page with key stats and verdict
   - 5-year P&L snapshot table
-  - DCF valuation with Monte Carlo range
+  - Embedded financial charts (Revenue/NP bars, EPS trend, ROCE trend, FCF bars)
+  - DCF / RIM valuation with Monte Carlo range
   - Multi-factor composite score breakdown
   - AI-written investment thesis (3 paragraphs)
   - Risk factors and key metrics
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -106,6 +108,124 @@ def _verdict_color(verdict: str):
     return _RED
 
 
+def _make_chart_page(
+    years: list,
+    sales: list,
+    np_: list,
+    eps: list,
+    roce: list,
+    fcf: list,
+    symbol: str,
+) -> Optional[str]:
+    """
+    Generate a 2×2 subplot financial chart and save to a temp PNG.
+    Returns the temp file path, or None if matplotlib is unavailable.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as mtick
+        import numpy as _np
+    except ImportError:
+        return None
+
+    yr_labels = [str(y)[-7:] for y in years]
+    x = range(len(yr_labels))
+
+    # Colour palette matching PDF
+    C_NAV  = "#0F2850"
+    C_GLD  = "#B48C28"
+    C_GRN  = "#1E8C3C"
+    C_RED  = "#B42828"
+    C_GRY  = "#787878"
+    C_BGD  = "#F8F8F8"
+
+    fig, axes = plt.subplots(2, 2, figsize=(11, 7))
+    fig.patch.set_facecolor("white")
+    fig.suptitle(f"{symbol} — Financial Performance", fontsize=13, fontweight="bold",
+                 color=C_NAV, y=0.98)
+
+    def _clean(lst):
+        return [v if v is not None else 0 for v in lst]
+
+    def _fmt_cr(ax):
+        ax.yaxis.set_major_formatter(mtick.FuncFormatter(
+            lambda v, _: f"₹{v/1000:.0f}K" if abs(v) >= 1000 else f"₹{v:.0f}"
+        ))
+
+    # ── Chart 1: Revenue + Net Profit (grouped bars) ───────────────────────
+    ax1 = axes[0, 0]
+    ax1.set_facecolor(C_BGD)
+    bw = 0.35
+    xs = _np.arange(len(yr_labels))
+    s_clean = _clean(sales)
+    n_clean = _clean(np_)
+    b1 = ax1.bar(xs - bw/2, s_clean, bw, label="Revenue", color=C_NAV, alpha=0.85)
+    b2 = ax1.bar(xs + bw/2, n_clean, bw, label="Net Profit", color=C_GRN, alpha=0.85)
+    ax1.set_title("Revenue vs Net Profit (₹ Cr)", fontsize=9, color=C_NAV, pad=4)
+    ax1.set_xticks(xs)
+    ax1.set_xticklabels(yr_labels, fontsize=7, rotation=30, ha="right")
+    ax1.legend(fontsize=7, loc="upper left", framealpha=0.7)
+    ax1.tick_params(labelsize=7)
+    _fmt_cr(ax1)
+    ax1.spines[["top", "right"]].set_visible(False)
+
+    # ── Chart 2: EPS trend (line + area fill) ─────────────────────────────
+    ax2 = axes[0, 1]
+    ax2.set_facecolor(C_BGD)
+    e_clean = _clean(eps)
+    ax2.plot(xs, e_clean, color=C_GLD, linewidth=2, marker="o", markersize=4, zorder=3)
+    ax2.fill_between(xs, 0, e_clean,
+                     color=C_GLD, alpha=0.15, where=[v >= 0 for v in e_clean])
+    ax2.set_title("EPS Trend (₹/share)", fontsize=9, color=C_NAV, pad=4)
+    ax2.set_xticks(xs)
+    ax2.set_xticklabels(yr_labels, fontsize=7, rotation=30, ha="right")
+    ax2.tick_params(labelsize=7)
+    ax2.spines[["top", "right"]].set_visible(False)
+    # Annotate last value
+    if e_clean:
+        ax2.annotate(f"₹{e_clean[-1]:.1f}", xy=(xs[-1], e_clean[-1]),
+                     xytext=(5, 5), textcoords="offset points", fontsize=7, color=C_GLD)
+
+    # ── Chart 3: ROCE % trend (line) ──────────────────────────────────────
+    ax3 = axes[1, 0]
+    ax3.set_facecolor(C_BGD)
+    r_clean = _clean(roce)
+    color_line = C_GRN if r_clean and r_clean[-1] >= 15 else C_GLD if r_clean and r_clean[-1] >= 10 else C_RED
+    ax3.plot(xs, r_clean, color=color_line, linewidth=2, marker="s", markersize=4, zorder=3)
+    ax3.axhline(15, color=C_GRY, linestyle="--", linewidth=0.8, alpha=0.6, label="15% benchmark")
+    ax3.fill_between(xs, 0, r_clean, color=color_line, alpha=0.10)
+    ax3.set_title("ROCE % (Return on Capital Employed)", fontsize=9, color=C_NAV, pad=4)
+    ax3.set_xticks(xs)
+    ax3.set_xticklabels(yr_labels, fontsize=7, rotation=30, ha="right")
+    ax3.legend(fontsize=7, framealpha=0.7)
+    ax3.tick_params(labelsize=7)
+    ax3.yaxis.set_major_formatter(mtick.PercentFormatter())
+    ax3.spines[["top", "right"]].set_visible(False)
+
+    # ── Chart 4: Free Cash Flow (bar, green/red) ──────────────────────────
+    ax4 = axes[1, 1]
+    ax4.set_facecolor(C_BGD)
+    f_clean = _clean(fcf)
+    bar_colors = [C_GRN if v >= 0 else C_RED for v in f_clean]
+    ax4.bar(xs, f_clean, color=bar_colors, alpha=0.85, zorder=3)
+    ax4.axhline(0, color=C_GRY, linewidth=0.8)
+    ax4.set_title("Free Cash Flow (₹ Cr)", fontsize=9, color=C_NAV, pad=4)
+    ax4.set_xticks(xs)
+    ax4.set_xticklabels(yr_labels, fontsize=7, rotation=30, ha="right")
+    ax4.tick_params(labelsize=7)
+    _fmt_cr(ax4)
+    ax4.spines[["top", "right"]].set_visible(False)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    fig.savefig(tmp.name, dpi=160, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return tmp.name
+
+
 def generate_pdf(
     symbol:       str,
     company_name: str,
@@ -145,12 +265,27 @@ def generate_pdf(
 
     idx5 = list(range(max(0, cut-5), cut))
 
-    sales  = _row(pl_rows, "Sales",        idx5)
-    np_    = _row(pl_rows, "Net Profit",   idx5)
-    eps    = _row(pl_rows, "EPS in Rs",    idx5)
-    opm    = _row(pl_rows, "OPM %",        idx5)
+    # For banks, "Revenue" replaces "Sales"; "OPM %" is absent
+    is_bank = pl_rows.get("Revenue") and not pl_rows.get("Sales")
+    sales_key = "Revenue" if is_bank else "Sales"
+    opm_key   = "Financing Margin %" if is_bank else "OPM %"
+    roce_key  = "ROCE %" if not is_bank else None
+
+    sales  = _row(pl_rows, sales_key,   idx5)
+    np_    = _row(pl_rows, "Net Profit", idx5)
+    eps    = _row(pl_rows, "EPS in Rs",  idx5)
+    opm    = _row(pl_rows, opm_key,      idx5)
     cfo    = _row(cf_rows, "Cash from Operating Activity", idx5)
-    roce   = _row(rat_rows, "ROCE %",      idx5)
+    roce   = _row(rat_rows, roce_key, idx5) if roce_key else _row(rat_rows, "ROE %", idx5)
+    fcf    = _row(cf_rows, "Free Cash Flow", idx5)
+
+    # Pre-generate chart PNG (will be None if matplotlib unavailable)
+    _chart_tmp: Optional[str] = None
+    if years_5:
+        _chart_tmp = _make_chart_page(
+            years=years_5, sales=sales, np_=np_,
+            eps=eps, roce=roce, fcf=fcf, symbol=symbol,
+        )
 
     # ── Build PDF ─────────────────────────────────────────────────────────────
     pdf = EquityResearchPDF(orientation="P", unit="mm", format="A4")
@@ -336,25 +471,71 @@ def generate_pdf(
                      new_y=YPos.NEXT    if col == 1 else YPos.TMARGIN)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # PAGE 3 — DCF VALUATION
+    # PAGE 3 — FINANCIAL CHARTS
+    # ══════════════════════════════════════════════════════════════════════════
+    if _chart_tmp:
+        pdf.add_page()
+        _s(13, bold=True, color=_NAVY)
+        pdf.cell(_BODY_W, 8, "FINANCIAL CHARTS  ·  10-Year Historical Performance",
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        _hrule(pdf)
+        pdf.ln(3)
+        try:
+            # Fit chart to body width, preserving aspect ratio (11:7 ≈ 1.57:1)
+            img_w = _BODY_W
+            img_h = img_w / (11 / 7)
+            pdf.image(_chart_tmp, x=_MARGIN, y=pdf.get_y(), w=img_w, h=img_h)
+            pdf.set_y(pdf.get_y() + img_h + 4)
+        except Exception:
+            pass
+        finally:
+            try:
+                os.unlink(_chart_tmp)
+            except Exception:
+                pass
+        _s(7, italic=True, color=_GREY)
+        pdf.cell(_BODY_W, 5,
+                 "Charts show last 5 fiscal years.  FCF bars: green = positive, red = negative cash generation.  "
+                 "ROCE benchmark line at 15%.",
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PAGE 4 — DCF / RIM VALUATION
     # ══════════════════════════════════════════════════════════════════════════
     pdf.add_page()
+    model_label = getattr(dcf_result, "model", "DCF") if dcf_result else "DCF"
+    dcf_title = (
+        "RESIDUAL INCOME MODEL  ·  Bank / NBFC Valuation" if model_label == "RIM"
+        else "DCF VALUATION  ·  Monte Carlo Analysis"
+    )
     _s(13, bold=True, color=_NAVY)
-    pdf.cell(_BODY_W, 8, "DCF VALUATION  ·  Monte Carlo Analysis", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(_BODY_W, 8, dcf_title, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     _hrule(pdf)
     pdf.ln(4)
 
     if dcf_result and dcf_result.intrinsic_value > 0:
-        # DCF parameter table
-        dcf_params = [
-            ("Model",               "10-Year FCF Projection + Gordon Growth Terminal Value"),
-            ("Base FCF",            f"Rs.{dcf_result.pv_fcf + dcf_result.terminal_value:.0f} Cr enterprise value"),
-            ("WACC",                f"{dcf_result.wacc*100:.2f}%  (auto-estimated from balance sheet)"),
-            ("Terminal Growth Rate",f"5.5%  (India long-run nominal GDP)"),
-            ("FCF CAGR (hist.)",    f"{dcf_result.fcf_cagr*100:+.1f}%  (used as base-case projection)"),
-            ("Simulations",         "10,000 Monte Carlo iterations  (WACC ±1.5%  |  CAGR ±4%)"),
-            ("Shares Outstanding",  f"{dcf_result.shares_cr:.1f} Crore"),
-        ]
+        model_is_rim = getattr(dcf_result, "model", "DCF") == "RIM"
+        if model_is_rim:
+            dcf_params = [
+                ("Model",            "Residual Income Model  (RIM)  —  Bank / NBFC"),
+                ("Book Value/Share", f"Rs.{dcf_result.iv_low * 0 + dcf_result.intrinsic_value - dcf_result.pv_fcf - dcf_result.terminal_value:.0f}  (equity BV per share)"),
+                ("Current ROE",      f"{dcf_result.fcf_cagr*100:.1f}%  (3-year average from data)"),
+                ("Cost of Equity",   f"{dcf_result.wacc*100:.2f}%  (CAPM: Rf={7.1:.1f}% + Beta x ERP={5.5:.1f}%)"),
+                ("Convergence",      "ROE declines linearly to long-run equilibrium over 15 years"),
+                ("Terminal Growth",  "5.5%  (India long-run nominal GDP)"),
+                ("Simulations",      "10,000 Monte Carlo iterations  (ROE ±2.0%  |  CoE ±1.5%)"),
+                ("Shares Outstanding", f"{dcf_result.shares_cr:.1f} Crore"),
+            ]
+        else:
+            dcf_params = [
+                ("Model",               "10-Year FCF Projection + Gordon Growth Terminal Value"),
+                ("Enterprise Value",    f"Rs.{dcf_result.pv_fcf + dcf_result.terminal_value:,.0f} Cr  (PV FCFs + PV Terminal)"),
+                ("WACC",                f"{dcf_result.wacc*100:.2f}%  (market-cap weighted; CAPM equity + debt after-tax)"),
+                ("Terminal Growth Rate",f"5.5%  (India long-run nominal GDP)"),
+                ("FCF CAGR (hist.)",    f"{dcf_result.fcf_cagr*100:+.1f}%  (smoothed 3Y avg — used as base-case projection)"),
+                ("Simulations",         "10,000 Monte Carlo iterations  (WACC ±1.5%  |  CAGR ±4%)"),
+                ("Shares Outstanding",  f"{dcf_result.shares_cr:.1f} Crore"),
+            ]
         for i, (lbl, val) in enumerate(dcf_params):
             bg = _LGREY if i % 2 == 0 else _WHITE
             _filled_rect(pdf, _MARGIN, pdf.get_y(), _BODY_W, 7, bg)
@@ -407,7 +588,7 @@ def generate_pdf(
         if dcf_result.notes:
             _s(7, italic=True, color=_GREY)
             for note in dcf_result.notes:
-                pdf.cell(_BODY_W, 5, f"⚠  {note}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                pdf.cell(_BODY_W, 5, f"[!] {note}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     else:
         _s(9, color=_GREY)
         pdf.cell(_BODY_W, 8, "DCF data insufficient — FCF history too erratic or negative.", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
