@@ -67,8 +67,9 @@ def _verdict_color(verdict: str) -> str:
 _DCF_W = 100
 
 def print_dcf_table(results: list[DCFResult]) -> None:
-    # Columns: Symbol(10) | IV(10) | CMP(8) | MoS(8) | IV Range(20) | WACC(6) | FCF CAGR(9) | Verdict(14)
+    # Columns: Sym(10)|Mdl(3)|IV(10)|CMP(8)|MoS(8)|Range(20)|CoE/WACC(6)|FCF/ROE(9)|Verdict(14)
     _S  = 10
+    _MD = 3
     _IV = 10
     _CM = 8
     _MOS = 8
@@ -77,25 +78,30 @@ def print_dcf_table(results: list[DCFResult]) -> None:
     _FC  = 9
     _VD  = 14
 
-    total = 2 + _S+2+_IV+2+_CM+2+_MOS+2+_RNG+2+_WC+2+_FC+2+_VD
+    total = 2 + _S+2+_MD+2+_IV+2+_CM+2+_MOS+2+_RNG+2+_WC+2+_FC+2+_VD
 
     print()
     print(_b(_m("═" * total)))
-    print(_b(_m("  NIFTY 50 — DCF INTRINSIC VALUE  |  10-Year Free Cash Flow Model  |  10,000 Monte Carlo Simulations")))
+    print(_b(_m(
+        "  NIFTY 50 — INTRINSIC VALUE  |  DCF (non-financials) + RIM (banks/NBFCs)"
+        "  |  10,000 Monte Carlo Simulations"
+    )))
     print(_b(_m("═" * total)))
     print("  " + _b(
-        _lj("Symbol",   _S)  + "  " +
-        _rj("IV (₹)",   _IV) + "  " +
-        _rj("CMP (₹)",  _CM) + "  " +
-        _rj("MoS %",    _MOS)+ "  " +
+        _lj("Symbol",    _S)  + "  " +
+        _lj("Mdl",       _MD) + "  " +
+        _rj("IV (₹)",    _IV) + "  " +
+        _rj("CMP (₹)",   _CM) + "  " +
+        _rj("MoS %",     _MOS)+ "  " +
         _lj("IV Range (P10–P90)", _RNG) + "  " +
-        _rj("WACC",     _WC) + "  " +
-        _rj("FCF CAGR", _FC) + "  " +
-        _lj("Verdict",  _VD)
+        _rj("CoE/WACC",  _WC) + "  " +
+        _rj("FCF/ROE",   _FC) + "  " +
+        _lj("Verdict",   _VD)
     ))
     print("  " + "─" * (total - 2))
 
     for r in sorted(results, key=lambda x: x.margin_of_safety or -99, reverse=True):
+        mdl_s = _c("RIM") if getattr(r, "model", "DCF") == "RIM" else _d("DCF")
         if r.intrinsic_value <= 0:
             iv_s   = _d("—")
             cmp_s  = _d("—")
@@ -117,11 +123,16 @@ def print_dcf_table(results: list[DCFResult]) -> None:
             hi = f"{r.iv_high:,.0f}" if r.iv_high > 0 else "?"
             rng_s  = f"{lo} – {hi}"
             wacc_s = f"{r.wacc*100:.1f}%"
-            fc_s   = f"{r.fcf_cagr*100:+.1f}%"
+            # For RIM: fcf_cagr field holds current ROE → label differently
+            if getattr(r, "model", "DCF") == "RIM":
+                fc_s = _c(f"ROE {r.fcf_cagr*100:.1f}%")
+            else:
+                fc_s = f"{r.fcf_cagr*100:+.1f}%"
 
         print(
             "  " +
             _lj(r.symbol, _S)  + "  " +
+            _lj(mdl_s,    _MD) + "  " +
             _rj(iv_s,     _IV) + "  " +
             _rj(cmp_s,    _CM) + "  " +
             _rj(mos_s,    _MOS)+ "  " +
@@ -133,7 +144,8 @@ def print_dcf_table(results: list[DCFResult]) -> None:
 
     print("  " + "─" * (total - 2))
     print(_d("  IV = Intrinsic Value per share  |  MoS = Margin of Safety  |  P10–P90 = 80% confidence interval"))
-    print(_d("  Model: 10-yr FCF projection + Gordon Growth terminal value  |  WACC auto-estimated from balance sheet"))
+    print(_d("  DCF = Free Cash Flow model  |  RIM = Residual Income Model (banks/NBFCs, ROE-convergence)"))
+    print(_d("  CoE/WACC = Cost of Equity (RIM) or WACC (DCF)  |  FCF/ROE = FCF CAGR (DCF) or current ROE (RIM)"))
     print()
 
 
@@ -226,7 +238,8 @@ def print_score_table(results: list[ScoreResult]) -> None:
 
     print("  " + "─" * (total - 2))
     print(_d("  Score = 0–100 percentile rank within Nifty 50  |  Quality/Growth/Earn Q = pillar scores"))
-    print(_d("  Pio = Piotroski F-Score (0–9)  |  ROCE/OPM = percentile rank  |  IC = Interest Coverage (EBITDA/Interest)"))
+    print(_d("  Pio = Piotroski F-Score (0–9)  |  ROCE% = percentile rank  |  IC = Interest Coverage (EBITDA/Int)"))
+    print(_d("  Banks/NBFCs: ROCE→ROE  |  OPM→NIM  |  IC→ROA%  (sector-appropriate quality metrics)"))
     print()
 
 
