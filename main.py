@@ -164,10 +164,25 @@ def cmd_dataset(args):
     print(f"  Dataset saved → {csv_path}\n")
 
 
+def cmd_cache(args):
+    """Show Screener data age and optionally refresh stale files."""
+    from src.utils.cache_manager import print_cache_table, refresh_stale
+    from config.nifty50_tickers import NIFTY50_TICKERS
+
+    symbols = list(NIFTY50_TICKERS.keys())
+    print_cache_table(symbols)
+
+    if args.refresh or args.force:
+        refresh_stale(symbols, force=args.force)
+    elif args.auto:
+        refresh_stale(symbols)
+
+
 def cmd_dcf(args):
     """Run DCF valuation engine on all 50 companies."""
     from src.valuation.dcf_engine import DCFEngine
     from src.reports.advanced_report import print_dcf_table
+    from src.utils.cache_manager import warn_if_stale
     from config.nifty50_tickers import NIFTY50_TICKERS
 
     symbols = list(NIFTY50_TICKERS.keys())
@@ -175,8 +190,10 @@ def cmd_dcf(args):
         sym = args.ticker.upper().replace(".NS", "")
         symbols = [sym] if sym in NIFTY50_TICKERS else symbols
 
+    warn_if_stale(symbols)   # one-line warning if any file is >90 days old
+
     engine = DCFEngine()
-    print(f"\nRunning DCF valuation on {len(symbols)} companies (10,000 Monte Carlo simulations each)...")
+    print(f"\nRunning DCF/RIM valuation on {len(symbols)} companies (10,000 Monte Carlo simulations each)...")
 
     results = []
     for sym in symbols:
@@ -184,7 +201,7 @@ def cmd_dcf(args):
         results.append(r)
         if args.verbose and r.intrinsic_value > 0:
             mos = f"{r.margin_of_safety*100:+.1f}%" if r.margin_of_safety is not None else "N/A"
-            print(f"  {sym:15s}  IV: ₹{r.intrinsic_value:,.0f}  MoS: {mos}  [{r.verdict}]")
+            print(f"  {sym:15s}  [{r.model}]  IV: ₹{r.intrinsic_value:,.0f}  MoS: {mos}  [{r.verdict}]")
 
     print_dcf_table(results)
 
@@ -193,9 +210,11 @@ def cmd_score(args):
     """Multi-factor composite score for all Nifty 50 companies."""
     from src.scoring.composite_score import CompositeScorer
     from src.reports.advanced_report import print_score_table, print_sector_ranking
+    from src.utils.cache_manager import warn_if_stale
     from config.nifty50_tickers import NIFTY50_TICKERS
 
     symbols = list(NIFTY50_TICKERS.keys())
+    warn_if_stale(symbols)
     print(f"\nComputing multi-factor composite scores for {len(symbols)} companies...")
 
     scorer  = CompositeScorer()
@@ -604,6 +623,13 @@ def main():
     p_pdf.add_argument("--ticker", type=str, required=True, help="Stock symbol e.g. TCS or RELIANCE.NS")
     p_pdf.add_argument("--no-ai", action="store_true", help="Skip AI thesis generation (faster, offline)")
     p_pdf.set_defaults(func=cmd_pdf)
+
+    # ── cache ──
+    p_cache = subparsers.add_parser("cache", help="Show Screener data age and refresh stale files")
+    p_cache.add_argument("--refresh", action="store_true", help="Re-fetch Screener data older than 90 days")
+    p_cache.add_argument("--force",   action="store_true", help="Re-fetch ALL Screener data (regardless of age)")
+    p_cache.add_argument("--auto",    action="store_true", help="Auto-refresh stale files only (same as --refresh)")
+    p_cache.set_defaults(func=cmd_cache)
 
     args = parser.parse_args()
     args.func(args)
