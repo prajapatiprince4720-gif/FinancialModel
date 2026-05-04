@@ -294,19 +294,21 @@ class PortfolioOptimizer:
             earnings_yield = 1 / pe
 
         # Quality return boost: use ROCE or ROE (banks have ROE, not ROCE)
-        quality_boost = (score / 100) * 0.03
+        quality_boost = (score / 100) * 0.02   # max +2% — trimmed to avoid inflating returns
         roc = self._tail_avg(roce_ser or roe_ser, 3) / 100 if (roce_ser or roe_ser) else 0.12
-        roc_boost = max(0, (roc - 0.12) * 0.2)   # excess ROC above 12% contributes
+        roc_boost = max(0, (roc - 0.15) * 0.15)   # only excess above 15% contributes, discounted
 
-        exp_ret = earnings_yield + eps_cagr * 0.5 + quality_boost + roc_boost
-        exp_ret = max(0.05, min(exp_ret, 0.40))
+        exp_ret = earnings_yield + eps_cagr * 0.35 + quality_boost + roc_boost
+        # Cap realistic Nifty 50 forward returns: even the best compound at ~20% pa
+        exp_ret = max(0.06, min(exp_ret, 0.22))
 
-        # Volatility: base 22%, reduced by quality score, raised by sector beta
+        # Volatility: sector-beta scaled, quality-adjusted.
+        # Floor at 14%: no Nifty 50 stock has realised annual vol below that.
         from src.valuation.dcf_engine import _SECTOR_BETA, _SYM_SECTOR as _SM
         beta     = _SECTOR_BETA.get(_SM.get(symbol, "DEFAULT"), 1.0)
-        base_vol = 0.20 * beta
-        qual_adj = 1.0 - (score / 100) * 0.25
-        vol      = max(0.10, min(base_vol * qual_adj, 0.50))
+        base_vol = 0.22 * beta                    # empirical Nifty 50 avg vol ~22%
+        qual_adj = 1.0 - (score / 100) * 0.20    # quality reduces vol by up to 20%
+        vol      = max(0.14, min(base_vol * qual_adj, 0.55))
 
         return exp_ret, vol, cmp
 
