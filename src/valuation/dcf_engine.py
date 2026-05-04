@@ -101,6 +101,7 @@ _SECTOR_BETA: dict[str, float] = {
     "INSURANCE": 0.85,
     "FINSERV":   1.10,
     "CEMENT":    1.15,
+    "DEFENSE":   0.90,   # PSU defense; steady order books, low cyclicality
     "DEFAULT":   1.00,
 }
 
@@ -121,7 +122,7 @@ _SYM_SECTOR: dict[str, str] = {
     "BAJFINANCE": "FINSERV", "BAJAJFINSV": "FINSERV", "SHRIRAMFIN": "FINSERV",
     "HDFCLIFE": "INSURANCE", "SBILIFE": "INSURANCE",
     "ADANIENT": "INFRA", "ADANIPORTS": "INFRA",
-    "TITAN": "FMCG", "ASIANPAINT": "FMCG", "BEL": "INFRA",
+    "TITAN": "FMCG", "ASIANPAINT": "FMCG", "BEL": "DEFENSE",
     "APOLLOHOSP": "DEFAULT", "ZOMATO": "DEFAULT",
 }
 
@@ -271,16 +272,19 @@ class DCFEngine:
         # Earnings-proxy fallback: inventory-cycle brands (TITAN), growth platforms
         # (ZOMATO), and capex-heavy stocks have chronically negative FCF/CFO.
         # Treat Net Profit as the cash earnings base instead of distorted cash flows.
+        # NP is post-interest (equity return), so we must NOT deduct debt again later.
+        using_np_proxy = False
         if np_series:
             cf_tail  = use_series[-5:] if len(use_series) >= 5 else use_series
             neg_rate = (sum(1 for v in cf_tail if v is not None and v <= 0)
                         / max(len(cf_tail), 1))
-            if neg_rate > 0.40:
+            if neg_rate >= 0.35:
                 np_pos = [v for v in np_series[-5:] if v and v > 0]
                 if np_pos:
-                    use_series = np_series
+                    use_series   = np_series
+                    using_np_proxy = True
                     notes.append(
-                        "FCF/CFO chronically negative — using Net Profit as earnings proxy"
+                        "FCF/CFO erratic — using Net Profit as equity earnings proxy (debt not re-deducted)"
                     )
 
         if len(use_series) < 2:
@@ -304,7 +308,9 @@ class DCFEngine:
         if base_fcf <= 0:
             return self._empty(symbol, "No positive FCF/CFO baseline")
 
-        net_debt_cr = max(0.0, total_debt_cr * 0.85)
+        # NP-proxy DCF is already an equity model (post-interest) — don't double-deduct debt.
+        # FCF/CFO DCF is an enterprise model — subtract net debt to get equity value.
+        net_debt_cr = 0.0 if using_np_proxy else max(0.0, total_debt_cr * 0.85)
 
         pv_fcf, pv_tv = self._dcf_calc(base_fcf, fcf_cagr, wacc, _TERM_G, _PROJ_YR)
         total_iv_cr   = pv_fcf + pv_tv
