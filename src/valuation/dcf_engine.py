@@ -19,6 +19,13 @@ _PRICE_CACHE: dict[str, Optional[float]] = {}
 _PRICE_CACHE_FILE = Path("data/raw/nse/live_prices.json")
 
 
+# Some NSE symbols need alternate yfinance tickers
+_TICKER_OVERRIDES: dict[str, list[str]] = {
+    "ZOMATO":     ["ETERNAL.NS"],
+    "TATAMOTORS": ["TATAMOTORS.BO", "TTM"],   # BSE fallback; ADR as last resort
+}
+
+
 def _fetch_cmp(symbol: str) -> Optional[float]:
     """Live price from yfinance — cached per session + to disk for 4 h."""
     if symbol in _PRICE_CACHE:
@@ -30,20 +37,29 @@ def _fetch_cmp(symbol: str) -> Optional[float]:
             try:
                 with open(_PRICE_CACHE_FILE) as f:
                     file_cache = json.load(f)
-                if symbol in file_cache:
+                if symbol in file_cache and file_cache[symbol]:
                     _PRICE_CACHE[symbol] = file_cache[symbol]
                     return file_cache[symbol]
             except Exception:
                 pass
 
+    # Build list of tickers to try: primary NSE + any overrides
+    tickers_to_try = [f"{symbol}.NS"] + _TICKER_OVERRIDES.get(symbol, [])
+    price = None
     try:
         import yfinance as yf
-        t = yf.Ticker(f"{symbol}.NS")
-        info = t.fast_info
-        price = float(info.last_price) if hasattr(info, "last_price") and info.last_price else None
-        if price is None or price == 0:
-            hist = t.history(period="1d")
-            price = float(hist["Close"].iloc[-1]) if not hist.empty else None
+        for ticker in tickers_to_try:
+            try:
+                t     = yf.Ticker(ticker)
+                info  = t.fast_info
+                price = float(info.last_price) if hasattr(info, "last_price") and info.last_price else None
+                if price is None or price == 0:
+                    hist  = t.history(period="1d")
+                    price = float(hist["Close"].iloc[-1]) if not hist.empty else None
+                if price and price > 0:
+                    break   # found a good price — stop trying
+            except Exception:
+                continue
     except Exception:
         price = None
 
@@ -118,6 +134,12 @@ _NBFC_SYMBOLS: set[str] = {
 }
 _FIN_SECTOR: set[str] = _BANK_SYMBOLS | _NBFC_SYMBOLS
 
+# Insurance: P/E relative model — CFO includes policyholder premiums (inflated),
+# so DCF gives nonsensical STRONG BUY (+150%). Sector trades at ~62x trailing P/E.
+_INSURANCE_SYMBOLS: set[str] = {"HDFCLIFE", "SBILIFE"}
+_INSURANCE_SECTOR_PE = 62.0   # Indian listed life insurers trailing P/E anchor
+_INSURANCE_PE_SIGMA  = 12.0   # ±1σ P/E band (~50–74x historically observed)
+
 # Projection horizon for RIM (banks are slow-moving; 15Y better than 10Y)
 _BANK_PROJ_YR = 15
 
@@ -168,6 +190,8 @@ class DCFEngine:
         if data is None:
             return self._empty(symbol, "No cached data")
 
+        if symbol in _INSURANCE_SYMBOLS:
+            return self._insurance_pe_value(symbol, data)
         if symbol in _FIN_SECTOR:
             return self._bank_rim_value(symbol, data)
         return self._dcf_value(symbol, data)
@@ -244,6 +268,21 @@ class DCFEngine:
             use_series = cfo_series if cfo_series else []
             notes.append("FCF erratic — using CFO as proxy")
 
+        # Earnings-proxy fallback: inventory-cycle brands (TITAN), growth platforms
+        # (ZOMATO), and capex-heavy stocks have chronically negative FCF/CFO.
+        # Treat Net Profit as the cash earnings base instead of distorted cash flows.
+        if np_series:
+            cf_tail  = use_series[-5:] if len(use_series) >= 5 else use_series
+            neg_rate = (sum(1 for v in cf_tail if v is not None and v <= 0)
+                        / max(len(cf_tail), 1))
+            if neg_rate > 0.40:
+                np_pos = [v for v in np_series[-5:] if v and v > 0]
+                if np_pos:
+                    use_series = np_series
+                    notes.append(
+                        "FCF/CFO chronically negative — using Net Profit as earnings proxy"
+                    )
+
         if len(use_series) < 2:
             return self._empty(symbol, "Insufficient FCF/CFO history")
 
@@ -307,6 +346,73 @@ class DCFEngine:
             terminal_value=round(pv_tv, 2), pv_fcf=round(pv_fcf, 2),
             shares_cr=shares_cr, verdict=self._verdict(mos, iv_per_share),
             model="DCF", notes=notes,
+        )
+
+    # ── P/E relative model for listed life insurers ───────────────────────────
+
+    def _insurance_pe_value(self, symbol: str, data: dict) -> DCFResult:
+        """
+        IV = 3Y-avg EPS × sector P/E anchor (62x for Indian life insurers).
+
+        Why not DCF/RIM? Insurance CFO includes policyholder premiums (inflows)
+        that are not free cash to equity — DCF overstates IV by 150%+.
+        P/E vs sector peers gives a grounded relative valuation.
+        """
+        pl   = data.get("profit_loss", {})
+        cmp  = data.get("current_price") or _fetch_cmp(symbol)
+
+        years   = pl.get("years", [])
+        pl_rows = pl.get("rows", {})
+
+        n   = len(years)
+        cut = n - 1 if years and "TTM" in str(years[-1]) else n
+
+        def _s(rows: dict, key: str) -> list[float]:
+            return [v for v in rows.get(key, [])[:cut] if v is not None]
+
+        np_series  = _s(pl_rows, "Net Profit")
+        eps_series = _s(pl_rows, "EPS in Rs")
+        notes: list[str] = []
+
+        shares_cr = self._shares(np_series, eps_series)
+        if shares_cr <= 0:
+            return self._empty(symbol, "Cannot determine share count")
+
+        eps_tail = [v for v in eps_series[-3:] if v and v > 0]
+        if not eps_tail:
+            return self._empty(symbol, "No positive EPS for P/E model")
+
+        avg_eps      = sum(eps_tail) / len(eps_tail)
+        iv_per_share = avg_eps * _INSURANCE_SECTOR_PE
+
+        rng       = np.random.default_rng(42)
+        pe_draws  = rng.normal(_INSURANCE_SECTOR_PE, _INSURANCE_PE_SIGMA, _MC_SIMS).clip(30, 100)
+        eps_draws = rng.normal(avg_eps, avg_eps * 0.10, _MC_SIMS).clip(avg_eps * 0.5, avg_eps * 2.0)
+        mc_arr    = pe_draws * eps_draws
+
+        iv_low  = float(np.percentile(mc_arr, 10))
+        iv_high = float(np.percentile(mc_arr, 90))
+
+        mos  = (iv_per_share - cmp) / cmp if cmp and cmp > 0 else None
+        beta = _SECTOR_BETA.get("INSURANCE", 0.85)
+        coe  = _RF_RATE + beta * _ERP
+
+        notes.append(
+            f"P/E Relative model  |  3Y-avg EPS=₹{avg_eps:.1f}  "
+            f"Sector P/E={_INSURANCE_SECTOR_PE:.0f}x  [Range: ~50–74x]"
+        )
+
+        return DCFResult(
+            symbol=symbol, cmp=cmp,
+            intrinsic_value=round(iv_per_share, 2),
+            iv_low=round(iv_low, 2), iv_high=round(iv_high, 2),
+            margin_of_safety=mos, wacc=coe,
+            fcf_cagr=avg_eps,
+            terminal_value=0.0,
+            pv_fcf=round(iv_per_share, 2),
+            shares_cr=shares_cr,
+            verdict=self._verdict(mos, iv_per_share),
+            model="PE", notes=notes,
         )
 
     # ── Residual Income Model for banks & NBFCs ───────────────────────────────
@@ -487,7 +593,18 @@ class DCFEngine:
     def _shares(self, np_series: list[float], eps_series: list[float]) -> float:
         if not np_series or not eps_series:
             return 0.0
-        np_cr, eps_rs = np_series[-1], eps_series[-1]
+
+        # Pre-IPO guard: detect massive EPS discontinuity (e.g. ZOMATO went from
+        # −₹70,000 EPS → −₹10 after IPO when share count multiplied ~10,000×).
+        # Only compute share count from post-discontinuity values.
+        clean_np, clean_eps = list(np_series), list(eps_series)
+        for i in range(len(clean_eps) - 1):
+            a, b = clean_eps[i], clean_eps[i + 1]
+            if a and b and abs(a) > 0 and abs(b / a) > 20:
+                clean_np  = np_series[i + 1:]
+                clean_eps = eps_series[i + 1:]
+
+        np_cr, eps_rs = clean_np[-1], clean_eps[-1]
         if not eps_rs or eps_rs == 0:
             return 0.0
         return np_cr / eps_rs

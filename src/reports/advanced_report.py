@@ -84,7 +84,7 @@ def print_dcf_table(results: list[DCFResult]) -> None:
     print(_b(_m("═" * total)))
     print(_b(_m(
         "  NIFTY 50 — INTRINSIC VALUE  |  DCF (non-financials) + RIM (banks/NBFCs)"
-        "  |  10,000 Monte Carlo Simulations"
+        " + PE (insurers)  |  10,000 Monte Carlo Simulations"
     )))
     print(_b(_m("═" * total)))
     print("  " + _b(
@@ -101,7 +101,13 @@ def print_dcf_table(results: list[DCFResult]) -> None:
     print("  " + "─" * (total - 2))
 
     for r in sorted(results, key=lambda x: x.margin_of_safety or -99, reverse=True):
-        mdl_s = _c("RIM") if getattr(r, "model", "DCF") == "RIM" else _d("DCF")
+        mdl = getattr(r, "model", "DCF")
+        if mdl == "RIM":
+            mdl_s = _c("RIM")
+        elif mdl == "PE":
+            mdl_s = _m("PE")
+        else:
+            mdl_s = _d("DCF")
         if r.intrinsic_value <= 0:
             iv_s   = _d("—")
             cmp_s  = _d("—")
@@ -123,9 +129,11 @@ def print_dcf_table(results: list[DCFResult]) -> None:
             hi = f"{r.iv_high:,.0f}" if r.iv_high > 0 else "?"
             rng_s  = f"{lo} – {hi}"
             wacc_s = f"{r.wacc*100:.1f}%"
-            # For RIM: fcf_cagr field holds current ROE → label differently
-            if getattr(r, "model", "DCF") == "RIM":
+            # Model-specific FCF/ROE column labels
+            if mdl == "RIM":
                 fc_s = _c(f"ROE {r.fcf_cagr*100:.1f}%")
+            elif mdl == "PE":
+                fc_s = _m(f"EPS ₹{r.fcf_cagr:.0f}")
             else:
                 fc_s = f"{r.fcf_cagr*100:+.1f}%"
 
@@ -144,8 +152,8 @@ def print_dcf_table(results: list[DCFResult]) -> None:
 
     print("  " + "─" * (total - 2))
     print(_d("  IV = Intrinsic Value per share  |  MoS = Margin of Safety  |  P10–P90 = 80% confidence interval"))
-    print(_d("  DCF = Free Cash Flow model  |  RIM = Residual Income Model (banks/NBFCs, ROE-convergence)"))
-    print(_d("  CoE/WACC = Cost of Equity (RIM) or WACC (DCF)  |  FCF/ROE = FCF CAGR (DCF) or current ROE (RIM)"))
+    print(_d("  DCF = Free Cash Flow model  |  RIM = Residual Income Model (banks/NBFCs)  |  PE = Sector P/E model (insurers)"))
+    print(_d("  CoE/WACC = Cost of Equity (RIM/PE) or WACC (DCF)  |  FCF/ROE = FCF CAGR / current ROE / 3Y-avg EPS"))
     print()
 
 

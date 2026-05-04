@@ -352,8 +352,16 @@ def generate_pdf(
         metrics.append(("EPS CAGR 3Y",       f"{score_result.eps_cagr_3y:+.1f}%"))
 
     if dcf_result:
-        metrics.append(("WACC", f"{dcf_result.wacc*100:.1f}%"))
-        metrics.append(("FCF CAGR (hist.)", f"{dcf_result.fcf_cagr*100:+.1f}%"))
+        _mdl = getattr(dcf_result, "model", "DCF")
+        if _mdl == "RIM":
+            metrics.append(("Cost of Equity", f"{dcf_result.wacc*100:.1f}%"))
+            metrics.append(("Current ROE",    f"{dcf_result.fcf_cagr*100:.1f}%"))
+        elif _mdl == "PE":
+            metrics.append(("Cost of Equity", f"{dcf_result.wacc*100:.1f}%"))
+            metrics.append(("3Y-Avg EPS",     f"Rs.{dcf_result.fcf_cagr:.1f}"))
+        else:
+            metrics.append(("WACC",           f"{dcf_result.wacc*100:.1f}%"))
+            metrics.append(("FCF CAGR (hist.)",f"{dcf_result.fcf_cagr*100:+.1f}%"))
 
     cols = 2
     col_w = _BODY_W / cols
@@ -506,6 +514,7 @@ def generate_pdf(
     model_label = getattr(dcf_result, "model", "DCF") if dcf_result else "DCF"
     dcf_title = (
         "RESIDUAL INCOME MODEL  ·  Bank / NBFC Valuation" if model_label == "RIM"
+        else "P/E RELATIVE VALUATION  ·  Life Insurance Sector" if model_label == "PE"
         else "DCF VALUATION  ·  Monte Carlo Analysis"
     )
     _s(13, bold=True, color=_NAVY)
@@ -515,7 +524,18 @@ def generate_pdf(
 
     if dcf_result and dcf_result.intrinsic_value > 0:
         model_is_rim = getattr(dcf_result, "model", "DCF") == "RIM"
-        if model_is_rim:
+        model_is_pe  = getattr(dcf_result, "model", "DCF") == "PE"
+        if model_is_pe:
+            dcf_params = [
+                ("Model",              "Sector P/E Relative Valuation  (Life Insurance)"),
+                ("3Y-Avg EPS",         f"Rs.{dcf_result.fcf_cagr:.1f}  (smoothed to reduce claim-year distortion)"),
+                ("Sector P/E Anchor",  "62x  (Indian listed life insurers trailing P/E)"),
+                ("P/E Range",          "~50x – 74x  (Monte Carlo ±1 sigma around 62x)"),
+                ("Rationale",          "Insurance CFO includes policyholder premiums — DCF/RIM inapplicable"),
+                ("Simulations",        "10,000 Monte Carlo iterations  (P/E sigma=12  |  EPS noise ±10%)"),
+                ("Shares Outstanding", f"{dcf_result.shares_cr:.1f} Crore"),
+            ]
+        elif model_is_rim:
             dcf_params = [
                 ("Model",            "Residual Income Model  (RIM)  —  Bank / NBFC"),
                 ("Book Value/Share", f"Rs.{dcf_result.iv_low * 0 + dcf_result.intrinsic_value - dcf_result.pv_fcf - dcf_result.terminal_value:.0f}  (equity BV per share)"),
