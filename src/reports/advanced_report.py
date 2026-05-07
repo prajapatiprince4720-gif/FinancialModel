@@ -158,6 +158,117 @@ def print_dcf_table(results: list[DCFResult]) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  TABLE 1b — DCF SENSITIVITY TABLE  (WACC × Terminal Growth)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def print_dcf_sensitivity(result: "DCFResult") -> None:
+    """
+    5×5 sensitivity grid: rows = WACC ±2 steps, cols = terminal growth ±2 steps.
+    Each cell shows IV (₹) and MoS% vs CMP, colour-coded by verdict.
+    Only shown for DCF model (not RIM / PE — those don't use WACC × terminal_g).
+    """
+    from src.valuation.dcf_engine import _TERM_G
+
+    mdl = getattr(result, "model", "DCF")
+    if mdl != "DCF":
+        return
+    if result.intrinsic_value <= 0 or not result.cmp:
+        return
+
+    # Reconstruct base_fcf from stored fields
+    # pv_fcf = PV of FCFs, terminal_value = PV of TV; we need base_fcf to recompute
+    # We'll import the engine calculation helper directly
+    from src.valuation.dcf_engine import DCFEngine, _PROJ_YR
+    engine = DCFEngine.__new__(DCFEngine)  # no __init__ needed for _dcf_calc
+
+    wacc_base  = result.wacc
+    tg_base    = _TERM_G
+    cmp        = result.cmp
+
+    # Approximate base_fcf: work backwards from pv_fcf + pv_tv at known wacc & cagr
+    # Simpler: just re-call _dcf_calc with different wacc/tg and ratio-scale
+    # We store pv_fcf + terminal_value as total_ev; we need to derive base_fcf
+    # Use: total_ev / shares_cr = iv + net_debt/shares_cr (before debt deduction)
+    # Since we can't cleanly invert, use a surrogate: iv × shares_cr as "equity_ev"
+    # and approximate base_fcf iteratively. For the grid we only need relative values.
+    #
+    # Cleaner approach: store base_fcf is not in DCFResult, so we use a ratio trick:
+    # iv(wacc2, tg2) / iv(wacc_base, tg_base) = dcf(wacc2,tg2) / dcf(wacc_base,tg_base)
+    base_iv = result.intrinsic_value
+
+    # Compute reference dcf (pv_fcf + pv_tv) with placeholder base_fcf=1.0
+    ref_pf, ref_pt = engine._dcf_calc(1.0, result.fcf_cagr, wacc_base, tg_base, _PROJ_YR)
+    ref_total = ref_pf + ref_pt
+    if ref_total <= 0:
+        return
+
+    wacc_steps = [-0.02, -0.01, 0.0, +0.01, +0.02]
+    tg_steps   = [-0.01, -0.005, 0.0, +0.005, +0.01]
+
+    def _cell_iv(dw: float, dg: float) -> float:
+        w  = max(0.07, wacc_base + dw)
+        tg = min(w - 0.005, tg_base + dg)    # tg must stay < wacc
+        pf, pt = engine._dcf_calc(1.0, result.fcf_cagr, w, tg, _PROJ_YR)
+        total  = pf + pt
+        if total <= 0 or ref_total <= 0:
+            return 0.0
+        return base_iv * (total / ref_total)
+
+    def _cell_color(iv: float) -> str:
+        if iv <= 0 or cmp <= 0:
+            return _d
+        mos = (iv - cmp) / cmp
+        if mos >=  0.25: return _g
+        if mos >=  0.10: return lambda s: f"\033[92m{s}\033[0m"
+        if mos >= -0.10: return _y
+        if mos >= -0.25: return lambda s: f"\033[91m{s}\033[0m"
+        return _r
+
+    CW = 12   # column width per cell
+
+    print()
+    print(_b(_m(f"  SENSITIVITY TABLE — {result.symbol}  "
+               f"(Base IV ₹{base_iv:,.0f}  |  CMP ₹{cmp:,.0f})")))
+    print(_d("  Rows = WACC adjustment  |  Cols = Terminal Growth adjustment  |  "
+             "Each cell: IV (₹) / MoS%"))
+
+    # Header row: terminal growth steps
+    hdr = "  " + _b(_lj("WACC \\ TermG", 14))
+    for dg in tg_steps:
+        lbl = f"{(tg_base+dg)*100:.2f}%"
+        if dg == 0:
+            lbl = _b(lbl)
+        hdr += _rj(lbl, CW)
+    print(hdr)
+    print("  " + "─" * (14 + CW * len(tg_steps) + 2))
+
+    for dw in wacc_steps:
+        w_lbl = f"  {(wacc_base+dw)*100:.1f}%"
+        if dw == 0:
+            w_lbl = _b(w_lbl)
+        row = _lj(w_lbl, 16)
+        for dg in tg_steps:
+            iv  = _cell_iv(dw, dg)
+            mos = (iv - cmp) / cmp if iv > 0 and cmp > 0 else None
+            if iv <= 0:
+                cell = _d("  —  ")
+            else:
+                mos_s = f"{mos*100:+.0f}%" if mos is not None else ""
+                cell  = f"₹{iv:,.0f} {mos_s}"
+            col_fn = _cell_color(iv)
+            if dw == 0 and dg == 0:
+                cell = _b(cell)
+            row += _rj(col_fn(cell), CW)
+        print(row)
+
+    print("  " + "─" * (14 + CW * len(tg_steps) + 2))
+    print(_d("  Green = STRONG BUY / BUY  |  Yellow = HOLD  |  Red = SELL / STRONG SELL"))
+    print(_d(f"  Base WACC={wacc_base*100:.1f}%  |  Base Terminal G={tg_base*100:.1f}%  "
+             f"|  FCF CAGR={result.fcf_cagr*100:+.1f}%"))
+    print()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  TABLE 2 — COMPOSITE QUALITY SCORE LEADERBOARD
 # ═══════════════════════════════════════════════════════════════════════════════
 

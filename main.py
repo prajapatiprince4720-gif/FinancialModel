@@ -181,16 +181,19 @@ def cmd_cache(args):
 def cmd_dcf(args):
     """Run DCF valuation engine on all 50 companies."""
     from src.valuation.dcf_engine import DCFEngine
-    from src.reports.advanced_report import print_dcf_table
+    from src.reports.advanced_report import print_dcf_table, print_dcf_sensitivity
     from src.utils.cache_manager import warn_if_stale
     from config.nifty50_tickers import NIFTY50_TICKERS
 
     symbols = list(NIFTY50_TICKERS.keys())
+    single_mode = False
     if args.ticker:
         sym = args.ticker.upper().replace(".NS", "")
-        symbols = [sym] if sym in NIFTY50_TICKERS else symbols
+        if sym in NIFTY50_TICKERS:
+            symbols    = [sym]
+            single_mode = True
 
-    warn_if_stale(symbols)   # one-line warning if any file is >90 days old
+    warn_if_stale(symbols)
 
     engine = DCFEngine()
     print(f"\nRunning DCF/RIM valuation on {len(symbols)} companies (10,000 Monte Carlo simulations each)...")
@@ -204,6 +207,14 @@ def cmd_dcf(args):
             print(f"  {sym:15s}  [{r.model}]  IV: ₹{r.intrinsic_value:,.0f}  MoS: {mos}  [{r.verdict}]")
 
     print_dcf_table(results)
+
+    # Sensitivity table: show for single-stock runs, or for every DCF stock in --verbose
+    for r in results:
+        if r.intrinsic_value > 0 and getattr(r, "model", "DCF") == "DCF":
+            if single_mode or args.verbose:
+                print_dcf_sensitivity(r)
+                if not single_mode:
+                    break   # verbose all-stock: show only first DCF stock to avoid flood
 
 
 def cmd_score(args):
@@ -529,6 +540,31 @@ def cmd_status(args):
         print("  (empty — run: python main.py ingest --ticker RELIANCE.NS)")
 
 
+def cmd_macro(args):
+    from src.utils.macro_rates import get_rf_rate, refresh_rates, set_rf_rate
+    from src.valuation.dcf_engine import _ERP, _TERM_G
+
+    if getattr(args, "set_rate", None):
+        rate = set_rf_rate(args.set_rate)
+        print(f"\n  \033[92mRF rate manually set to {rate*100:.2f}%\033[0m  (cached for 24h)")
+    elif getattr(args, "refresh", False):
+        rate = refresh_rates()
+    else:
+        rate = get_rf_rate()
+
+    coe_example = rate + 1.0 * _ERP   # beta=1.0 stock
+    print()
+    print("\033[1m  INDIA MACRO RATES — DCF / CAPM INPUTS\033[0m")
+    print("  " + "─" * 50)
+    print(f"  India 10Y GSEC yield (RF rate)  : \033[92m{rate*100:.2f}%\033[0m")
+    print(f"  Equity Risk Premium (ERP)        : {_ERP*100:.1f}%  (Damodaran India estimate)")
+    print(f"  Terminal Growth Rate             : {_TERM_G*100:.1f}%  (long-run nominal GDP)")
+    print(f"  Example CoE (β=1.0 stock)        : {coe_example*100:.2f}%  (RF + β × ERP)")
+    print()
+    print("  Run  python main.py macro --refresh  to force a fresh fetch.")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="EquityLens — AI Equity Research for Nifty 50",
@@ -630,6 +666,13 @@ def main():
     p_cache.add_argument("--force",   action="store_true", help="Re-fetch ALL Screener data (regardless of age)")
     p_cache.add_argument("--auto",    action="store_true", help="Auto-refresh stale files only (same as --refresh)")
     p_cache.set_defaults(func=cmd_cache)
+
+    p_macro = subparsers.add_parser("macro", help="Show / refresh live India macro rates (10Y GSEC yield)")
+    p_macro.add_argument("--refresh", action="store_true", help="Force-fetch fresh India 10Y GSEC yield from market data")
+    p_macro.add_argument("--set", dest="set_rate", type=float, metavar="PCT",
+                         help="Manually set the 10Y GSEC yield in %% (e.g. --set 6.75). "
+                              "Check https://www.nseindia.com/market-data/bonds-trading-information")
+    p_macro.set_defaults(func=cmd_macro)
 
     args = parser.parse_args()
     args.func(args)

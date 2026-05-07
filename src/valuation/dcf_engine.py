@@ -81,11 +81,13 @@ def _fetch_cmp(symbol: str) -> Optional[float]:
 
 
 # ── India macro constants ──────────────────────────────────────────────────────
-_RF_RATE  = 0.071   # India 10Y Gilt (risk-free rate)
-_ERP      = 0.055   # India Equity Risk Premium
-_TERM_G   = 0.055   # Terminal growth rate (long-run nominal GDP)
-_PROJ_YR  = 10      # Projection horizon
-_MC_SIMS  = 10_000  # Monte Carlo draws
+# RF_RATE is fetched live from NSE/yfinance (24h cache) — never hardcoded.
+from src.utils.macro_rates import get_rf_rate as _get_rf_rate
+_RF_RATE  = _get_rf_rate()   # India 10Y GSEC yield (live, refreshed daily)
+_ERP      = 0.055            # India Equity Risk Premium (Damodaran estimate)
+_TERM_G   = 0.055            # Terminal growth rate (long-run nominal GDP)
+_PROJ_YR  = 10               # Projection horizon
+_MC_SIMS  = 10_000           # Monte Carlo draws
 
 # Sector betas (systematic risk)
 _SECTOR_BETA: dict[str, float] = {

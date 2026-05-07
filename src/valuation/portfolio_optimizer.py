@@ -22,7 +22,8 @@ from typing import Optional
 import numpy as np
 
 
-_RF_RATE      = 0.071      # India 10Y Gilt (annual)
+from src.utils.macro_rates import get_rf_rate as _get_rf_rate
+_RF_RATE      = _get_rf_rate()   # India 10Y GSEC yield (live, 24h cache)
 _N_PORT       = 10_000     # Monte Carlo portfolios (doubled for better coverage)
 _MIN_W        = 0.04       # min weight per stock (4%)
 _MAX_W        = 0.35       # max weight per stock (35%)
