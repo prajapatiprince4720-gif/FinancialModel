@@ -375,15 +375,16 @@ def cmd_train(args):
     # ── batch / --all mode ────────────────────────────────────────────────────
     all_symbols = list(NIFTY50_TICKERS.keys())
 
-    # Find untrained companies (no cache or empty cache)
+    # Find untrained / under-trained companies (threshold: 150 of 180 Q&As)
     import json as _json
+    _TRAINED_THRESHOLD = 150
     def _is_trained(sym: str) -> bool:
         path = f"data/faq_cache/{sym}_faq.json"
         if not os.path.exists(path):
             return False
         try:
             with open(path) as f:
-                return len(_json.load(f)) > 0
+                return len(_json.load(f)) >= _TRAINED_THRESHOLD
         except Exception:
             return False
 
