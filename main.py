@@ -328,115 +328,145 @@ def cmd_portfolio(args):
 
 
 def cmd_train(args):
-    import os
-    from src.training.faq_trainer import FAQTrainer
-    from config.nifty50_tickers import NIFTY50_TICKERS
+    """
+    Pre-answer the investor question bank per company and store it in the KB.
 
-    trainer = FAQTrainer()
+    Training is resumable: a company interrupted part-way through resumes from
+    its cache instead of being frozen at a partial answer count. Progress is
+    measured by src.training.faq_trainer.training_status(), the single source of
+    truth shared with scripts/daily_train.sh.
+    """
+    from src.training.faq_trainer import (
+        FAQTrainer, TRAINED_RATIO, company_status, training_status,
+    )
 
     # ── progress command: show what's done / pending ──────────────────────────
     if getattr(args, "progress", False):
-        import json
-        done, pending = [], []
-        for sym, name in NIFTY50_TICKERS.items():
-            cache = f"data/faq_cache/{sym}_faq.json"
-            if os.path.exists(cache):
-                with open(cache) as f:
-                    count = len(json.load(f))
-                if count > 0:
-                    done.append((sym, name, count))
-                else:
-                    pending.append((sym, name))
-            else:
-                pending.append((sym, name))
+        st = training_status()
+        per = st["per_company"]
+        print(f"\n=== FAQ Training Progress: {len(st['trained'])}/{st['total']} "
+              f"companies trained (>= {TRAINED_RATIO*100:.0f}% of question bank) ===\n")
 
-        print(f"\n=== FAQ Training Progress: {len(done)}/50 companies done ===\n")
-        if done:
-            print("✓ Done:")
-            for sym, name, count in done:
-                print(f"    {sym:15s}  {name:35s}  {count} Q&A pairs")
-        if pending:
-            print(f"\n⏳ Pending ({len(pending)} companies):")
-            for sym, name in pending:
-                print(f"    {sym:15s}  {name}")
-        days_left = -(-len(pending) // args.batch)  # ceiling division
-        print(f"\n  At {args.batch} companies/day → {days_left} day(s) remaining")
+        if st["trained"]:
+            print("  Trained:")
+            for sym in st["trained"]:
+                c = per[sym]
+                print(f"    {sym:15s}  {c['company']:35s}  {c['answered']:3d}/{c['expected']:3d}")
+        if st["partial"]:
+            print(f"\n  Partial ({len(st['partial'])}) — will resume from cache:")
+            for sym in st["partial"]:
+                c = per[sym]
+                print(f"    {sym:15s}  {c['company']:35s}  {c['answered']:3d}/{c['expected']:3d}"
+                      f"  ({c['ratio']*100:4.0f}%)  {len(c['missing'])} to go")
+        if st["missing"]:
+            print(f"\n  Not started ({len(st['missing'])}):")
+            for sym in st["missing"]:
+                print(f"    {sym:15s}  {per[sym]['company']}")
+
+        questions_left = sum(len(per[s]["missing"]) for s in st["pending"])
+        print(f"\n  Questions still to answer: {questions_left:,} "
+              f"across {len(st['pending'])} companies")
+        if st["pending"]:
+            days_left = -(-len(st["pending"]) // max(args.batch, 1))
+            print(f"  At {args.batch} companies/day -> ~{days_left} day(s) remaining")
         return
+
+    trainer = FAQTrainer()
 
     # ── train a single ticker ─────────────────────────────────────────────────
     if args.ticker:
+        sym = args.ticker.upper().replace(".NS", "").replace(".BO", "")
+        before = company_status(sym)
         print(f"\nTraining FAQ for {args.ticker}...")
-        print(f"Generating ~180 questions and answering in batches of 15\n")
+        print(f"  Cached: {before['answered']}/{before['expected']} "
+              f"— {len(before['missing'])} questions to answer "
+              f"in batches of 15\n")
         n = trainer.train_ticker(args.ticker, refresh=args.refresh)
+        after = company_status(sym)
         print(f"\nDone — {n} Q&A chunks stored for {args.ticker}")
-        print(f"Total docs in store: {trainer.store.count()}")
+        print(f"  Now at {after['answered']}/{after['expected']} "
+              f"({after['ratio']*100:.0f}%) — trained={after['trained']}")
+        print(f"  Total docs in store: {trainer.store.count()}")
         return
 
     # ── batch / --all mode ────────────────────────────────────────────────────
-    all_symbols = list(NIFTY50_TICKERS.keys())
+    st  = training_status()
+    per = st["per_company"]
+    pending = st["pending"]
 
-    # Find untrained / under-trained companies (threshold: 150 of 180 Q&As)
-    import json as _json
-    _TRAINED_THRESHOLD = 150
-    def _is_trained(sym: str) -> bool:
-        path = f"data/faq_cache/{sym}_faq.json"
-        if not os.path.exists(path):
-            return False
-        try:
-            with open(path) as f:
-                return len(_json.load(f)) >= _TRAINED_THRESHOLD
-        except Exception:
-            return False
-
-    untrained = [sym for sym in all_symbols if not _is_trained(sym)]
-
-    if not untrained:
-        print("\nAll 50 companies are already trained!")
+    if not pending:
+        print(f"\nAll {st['total']} companies are already trained!")
         print(f"Total docs in store: {trainer.store.count()}")
         print("Use --refresh to regenerate answers.")
         return
 
-    # Pick the next batch
-    batch_size = args.batch if not getattr(args, "all", False) else len(untrained)
-    to_train = untrained[:batch_size]
-    remaining_after = untrained[batch_size:]
+    # Resume the closest-to-done companies first: they need the fewest calls, so
+    # a quota-limited run converts tokens into completed companies fastest.
+    pending.sort(key=lambda s: len(per[s]["missing"]))
 
-    print(f"\n{'='*60}")
-    print(f"  FAQ Training — Daily Batch")
-    print(f"{'='*60}")
-    print(f"  Already trained : {len(all_symbols) - len(untrained)}/50 companies")
-    print(f"  Training today  : {len(to_train)} companies")
-    print(f"  Still pending   : {len(remaining_after)} after today")
-    days_left = -(-len(remaining_after) // args.batch)
-    if remaining_after:
-        print(f"  Days remaining  : ~{days_left} more day(s) at {args.batch}/day")
-    print(f"{'='*60}\n")
+    batch_size = len(pending) if getattr(args, "all", False) else args.batch
+    to_train   = pending[:batch_size]
+    remaining  = pending[batch_size:]
+    workers    = max(1, getattr(args, "workers", 1) or 1)
+
+    print(f"\n{'='*64}")
+    print(f"  FAQ Training — {'full run' if getattr(args, 'all', False) else 'daily batch'}")
+    print(f"{'='*64}")
+    print(f"  Already trained : {len(st['trained'])}/{st['total']} companies")
+    print(f"  Training now    : {len(to_train)} companies "
+          f"({sum(len(per[s]['missing']) for s in to_train):,} questions)")
+    print(f"  Still pending   : {len(remaining)} after this run")
+    if workers > 1:
+        print(f"  Workers         : {workers} (parallel)")
+    print(f"{'='*64}\n")
 
     results: dict[str, int] = {}
-    for i, sym in enumerate(to_train, 1):
-        ticker_yf = f"{sym}.NS"
-        company = NIFTY50_TICKERS[sym]
-        print(f"[{i}/{len(to_train)}] {company} ({ticker_yf})")
-        try:
-            n = trainer.train_ticker(ticker_yf, refresh=args.refresh)
-            results[ticker_yf] = n
-            print(f"       ✓ {n} Q&A pairs stored\n")
-        except Exception as exc:
-            print(f"       ✗ Failed: {exc}\n")
-            results[ticker_yf] = -1
 
-    success = sum(1 for v in results.values() if v > 0)
-    total_done = len(all_symbols) - len(untrained) + success
-    print(f"{'='*60}")
-    print(f"  Today: {success}/{len(to_train)} companies trained successfully")
-    print(f"  Overall progress: {total_done}/50 companies complete")
-    print(f"  Total docs in store: {trainer.store.count()}")
-    if remaining_after:
-        next_up = [NIFTY50_TICKERS[s] for s in remaining_after[:3]]
-        print(f"  Next up tomorrow: {', '.join(next_up)}{' ...' if len(remaining_after) > 3 else ''}")
+    def _train_one(sym: str) -> int:
+        return trainer.train_ticker(f"{sym}.NS", refresh=args.refresh)
+
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_train_one, sym): sym for sym in to_train}
+            for done_count, fut in enumerate(as_completed(futures), 1):
+                sym = futures[fut]
+                try:
+                    results[sym] = fut.result()
+                    c = company_status(sym)
+                    print(f"[{done_count}/{len(to_train)}] {per[sym]['company']}: "
+                          f"{c['answered']}/{c['expected']} ({c['ratio']*100:.0f}%) "
+                          f"trained={c['trained']}")
+                except Exception as exc:
+                    results[sym] = -1
+                    print(f"[{done_count}/{len(to_train)}] {per[sym]['company']}: FAILED — {exc}")
     else:
-        print(f"  All 50 companies trained!")
-    print(f"{'='*60}")
+        for i, sym in enumerate(to_train, 1):
+            print(f"[{i}/{len(to_train)}] {per[sym]['company']} ({sym}.NS) — "
+                  f"{len(per[sym]['missing'])} questions")
+            try:
+                results[sym] = _train_one(sym)
+                c = company_status(sym)
+                print(f"       {c['answered']}/{c['expected']} "
+                      f"({c['ratio']*100:.0f}%) trained={c['trained']}\n")
+            except Exception as exc:
+                print(f"       FAILED: {exc}\n")
+                results[sym] = -1
+
+    final = training_status()
+    print(f"{'='*64}")
+    print(f"  Overall progress : {len(final['trained'])}/{final['total']} companies trained")
+    print(f"  Total docs       : {trainer.store.count()}")
+    if final["pending"]:
+        left = sum(len(final['per_company'][s]['missing']) for s in final['pending'])
+        print(f"  Still pending    : {len(final['pending'])} companies, {left:,} questions")
+        next_up = [final["per_company"][s]["company"] for s in final["pending"][:3]]
+        print(f"  Next up          : {', '.join(next_up)}"
+              f"{' ...' if len(final['pending']) > 3 else ''}")
+        print(f"  Re-run the same command to resume — nothing is re-answered twice.")
+    else:
+        print(f"  All {final['total']} companies trained!")
+    print(f"{'='*64}")
 
 
 def cmd_qa(args):
@@ -615,6 +645,7 @@ def main():
     p_train.add_argument("--ticker", type=str, help="Train a single stock e.g. RELIANCE.NS")
     p_train.add_argument("--all", action="store_true", help="Train ALL remaining untrained companies (ignores --batch)")
     p_train.add_argument("--batch", type=int, default=8, help="How many companies to train today (default 8)")
+    p_train.add_argument("--workers", type=int, default=1, help="Train this many companies in parallel (default 1)")
     p_train.add_argument("--refresh", action="store_true", help="Re-generate answers even if cached")
     p_train.add_argument("--progress", action="store_true", help="Show training progress across all 50 companies")
     p_train.set_defaults(func=cmd_train)
