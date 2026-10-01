@@ -57,3 +57,10 @@ htmlcov/
 
 # MyPy
 .mypy_cache/
+
+# Env backups (may contain real keys)
+.env.bak*
+
+# Generated report output
+reports/exports/
+reports/*_EquityResearch_*.pdf
