@@ -406,7 +406,8 @@ def _quality_flags(cd: CompanyData, market: dict[str, Any], metrics: dict[str, A
 
 def valuation_summary(v: Any) -> dict[str, Any]:
     """The fact-sheet view of a DCFResult; {} when no valuation was possible."""
-    if v is None or getattr(v, "intrinsic_value", 0) <= 0:
+    # A zero value with a verdict is a result (debt exceeds value), not a gap.
+    if v is None or getattr(v, "verdict", "") in ("INSUFFICIENT_DATA", ""):
         return {}
     return {
         "model": v.model,

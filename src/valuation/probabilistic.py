@@ -1,53 +1,47 @@
 r"""
-Probabilistic DCF: intrinsic value as a distribution, not a point.
+Probabilistic value-driver valuation: intrinsic value as a distribution.
 
 The question an investor actually has is "how likely is it that this is worth
 more than I'd pay?" — so that is what this module answers.
 
-1. Growth fade (calculus)
-   Growth starts at g₀ (estimated from history) and decays exponentially toward
-   the long-run rate g∞:
+1. Value-driver model (why not plain free cash flow)
+   Growth is not free: to grow operating profit (NOPAT) a company must invest,
+   and how much depends on the return it earns on new capital (RONIC):
 
-       g(t) = g∞ + (g₀ − g∞)·e^(−λt),   λ = ln 2 / half-life
+       I_t   = (NOPAT_{t+1} − NOPAT_t) / RONIC_t        investment needed
+       FCF_t = NOPAT_t − I_t
+       TV_N  = NOPAT_{N+1} · (1 − g∞/RONIC∞) / (r − g∞)   (McKinsey value-driver formula)
 
-   The old engine held g₀ flat for ten years and then dropped to g∞ in one step,
-   which both overstated high growers (RELIANCE at 22% for a decade) and put a
-   kink in the cash-flow path. Here growth converges smoothly. With a 4-year
-   half-life and a 10-year horizon, 2^(−2.5) ≈ 18% of the initial gap remains at
-   year 10 — a residual step into the terminal rate, far smaller than the old one
-   (a 20% grower steps from 7.7% rather than from 20% to 5.5%).
+   Reported free cash flow subtracts *all* capex, growth capex included, so the
+   earlier FCF-DCF valued fast-growing and capex-heavy companies near zero
+   (ULTRACEMCO ₹521 vs a ₹12,010 price). Here growth is credited and charged at
+   the company's own measured return on capital. Two identities follow, both
+   tested: if RONIC = r growth adds nothing (V = NOPAT₁/r for any growth path);
+   with constant g and RONIC it reduces to V = NOPAT₁(1 − g/RONIC)/(r − g).
 
-       CF_t = CF₀ · ∏_{s=1..t} (1 + g(s))
-       V    = Σ_{t=1..N} CF_t / (1+r)^t  +  CF_N·(1+g∞) / (r − g∞) / (1+r)^N
+2. Fade (calculus)
+   Growth and returns both decay exponentially toward their long-run values:
+       g(t)     = g∞     + (g₀    − g∞)    ·e^(−λt)
+       RONIC(t) = RONIC∞ + (ROIC₀ − RONIC∞)·e^(−λt),   λ = ln 2 / half-life
+       RONIC∞   = r + φ·(ROIC₀ − r)
+   φ ∈ [0, 1] is moat durability: the share of today's excess return that
+   competition leaves in place for ever. φ = 0 is perfect competition.
 
-2. Inputs as correlated random variables (probability, linear algebra)
-   (g₀, g∞, ERP, β) are drawn jointly from a multivariate Student-t:
+3. Inputs as correlated random variables (probability, linear algebra)
+   (g₀, g∞, ERP, β, ROIC₀, φ) are drawn jointly from a multivariate Student-t:
+       Z = L·ε, ε ~ N(0, I), L = cholesky(C);   X = Z / √(W/ν), W ~ χ²_ν, ν = 5
+   An inflation shock raises nominal long-run growth *and* the return investors
+   demand, so g∞ and the discount rate move together; independent draws would
+   overstate the spread. Student-t because valuation surprises cluster in tails.
 
-       Z = L·ε,  ε ~ N(0, I),  L = cholesky(C)      — correlation C
-       X = Z / √(W/ν),  W ~ χ²_ν                    — fat tails, ν = 5
+4. P(undervalued), sensitivities, reverse DCF
+   P(V > price) is the share of scenarios above the price; the reported value is
+   the median, so P > 50% exactly when value > price. Sensitivities are central-
+   difference partial derivatives. The reverse DCF solves V(g₀) = price with a
+   safeguarded Newton iteration; V may rise *or fall* with g₀ (growth destroys
+   value when ROIC < r), so the bracket is direction-agnostic.
 
-   Correlation matters: an inflation shock raises nominal long-run growth *and*
-   the return investors demand, so g∞ and the discount rate move together and
-   partly offset. Independent draws overstate the spread of outcomes.
-   Student-t rather than normal because valuation surprises cluster in the tails.
-
-3. Probability of undervaluation
-   P(V > price) is the share of simulated values above the price. The reported
-   intrinsic value is the median of the distribution, so P > 50% exactly when
-   the intrinsic value exceeds the price — the number and the probability can
-   never contradict each other.
-
-4. Sensitivities (partial derivatives)
-   ∂V/∂r, ∂V/∂g₀, ∂V/∂g∞ by central differences, expressed as "% change in value
-   per +1 percentage point". Tells the reader which assumption the answer
-   hinges on.
-
-5. Reverse DCF (Newton's method)
-   Solve V(g₀) = price for g₀ — the starting growth the market is pricing in.
-   V is increasing in g₀, so a safeguarded Newton iteration (bisection fallback
-   inside a shrinking bracket) always converges.
-
-Equity is a limited-liability claim: per scenario, equity = max(EV − net debt, 0).
+Equity is a limited-liability claim: per scenario, equity = max(EV − debt, 0).
 """
 from __future__ import annotations
 
@@ -58,26 +52,30 @@ from typing import Optional
 import numpy as np
 
 # ── Distribution assumptions ──────────────────────────────────────────────────
-# These are priors, not facts. They are stated here, in one place, so they can be
-# tested (Phase 4: calibration — do 70% probabilities come true 70% of the time?)
-# and replaced by estimates (Phase 2: empirical-Bayes growth, regression betas).
+# Priors, not facts. Stated in one place so Phase 4 can test them (are 70%
+# probabilities right 70% of the time?) and Phase 2 can replace them with
+# estimates (empirical-Bayes growth, regression betas).
 
-VARIABLES = ("g0", "g_inf", "erp", "beta")
+VARIABLES = ("g0", "g_inf", "erp", "beta", "roic", "moat")
 
-SIGMA = {
+DEFAULT_SIGMA = {
     "g0":    0.04,     # starting growth: ±4pp (1σ)
     "g_inf": 0.0075,   # long-run nominal growth: ±0.75pp
     "erp":   0.010,    # equity risk premium: ±1pp
     "beta":  0.15,     # sector beta → company beta
+    "roic":  0.03,     # overridden per company by its own robust ROIC spread
+    "moat":  0.20,     # durability of excess returns
 }
 
 # Rows/cols in VARIABLES order.
 CORRELATION = np.array([
-    #  g0     g_inf   erp    beta
-    [ 1.00,  0.30,  -0.20,  0.00],   # g0: persistent growers have higher g∞; risk-off cuts both
-    [ 0.30,  1.00,   0.40,  0.00],   # g_inf: inflation lifts nominal growth and required return
-    [-0.20,  0.40,   1.00,  0.00],   # erp
-    [ 0.00,  0.00,   0.00,  1.00],   # beta: firm-specific, independent
+    #  g0     g_inf   erp    beta   roic   moat
+    [ 1.00,  0.30,  -0.20,  0.00,  0.30,  0.00],   # g0
+    [ 0.30,  1.00,   0.40,  0.00,  0.00,  0.00],   # g_inf: inflation lifts growth and required return
+    [-0.20,  0.40,   1.00,  0.00,  0.00,  0.00],   # erp: risk-off cuts growth expectations
+    [ 0.00,  0.00,   0.00,  1.00,  0.00,  0.00],   # beta
+    [ 0.30,  0.00,   0.00,  0.00,  1.00,  0.00],   # roic: high-return firms tend to grow faster
+    [ 0.00,  0.00,   0.00,  0.00,  0.00,  1.00],   # moat
 ])
 
 BOUNDS = {
@@ -85,149 +83,162 @@ BOUNDS = {
     "g_inf": (0.030, 0.075),
     "erp":   (0.030, 0.100),
     "beta":  (0.40, 2.00),
+    "roic":  (0.02, 1.00),
+    "moat":  (0.00, 1.00),
 }
 
+MOAT_PRIOR    = 0.5        # neutral: half of today's excess return survives
 STUDENT_T_DOF = 5
-MIN_SPREAD    = 0.015      # r − g∞ floor; Gordon growth explodes as the spread → 0
+MIN_SPREAD    = 0.015      # r − g∞ floor; the terminal formula explodes as it → 0
 N_SIMS        = 10_000
 
 
 # ── Inputs ────────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
-class DCFInputs:
-    base_cf:  float            # ₹ Cr, starting annual cash flow
+class ValueDriverInputs:
+    nopat0:   float            # ₹ Cr, normalised current after-tax operating profit
     g0:       float            # starting growth, point estimate
+    roic0:    float            # after-tax return on invested capital, point estimate
     rf:       float            # risk-free rate (observed, not simulated)
     beta:     float
     erp:      float
     shares:   float            # crore shares
-    net_debt: float = 0.0      # ₹ Cr, deducted from EV (0 for equity cash flows)
-    w_equity: float = 1.0      # capital-structure weights for WACC
+    debt:     float = 0.0      # ₹ Cr, deducted from EV
+    w_equity: float = 1.0
     w_debt:   float = 0.0
     kd_after_tax: float = 0.0
-    equity_cash_flows: bool = False   # True → discount at cost of equity
     g_inf:    float = 0.055
+    moat:     float = MOAT_PRIOR
+    roic_sd:  float = DEFAULT_SIGMA["roic"]
     horizon:  int   = 10
-    half_life: float = 4.0     # years for (g₀ − g∞) to halve
+    half_life: float = 4.0
 
     def discount_rate(self, beta=None, erp=None):
-        """Cost of equity for equity cash flows, else WACC. Vectorises over arrays."""
+        """WACC. Vectorises over arrays of beta / erp."""
         beta = self.beta if beta is None else beta
         erp  = self.erp if erp is None else erp
-        ke = self.rf + beta * erp
-        if self.equity_cash_flows:
-            return ke
-        return self.w_equity * ke + self.w_debt * self.kd_after_tax
+        return self.w_equity * (self.rf + beta * erp) + self.w_debt * self.kd_after_tax
+
+    def centre(self) -> dict[str, float]:
+        return {"g0": self.g0, "g_inf": self.g_inf, "erp": self.erp,
+                "beta": self.beta, "roic": self.roic0, "moat": self.moat}
+
+    def sigma(self) -> dict[str, float]:
+        return {**DEFAULT_SIGMA, "roic": self.roic_sd}
 
 
 # ── Core valuation (vectorised) ───────────────────────────────────────────────
 
-def fade_path(g0, g_inf, horizon: int, half_life: float) -> np.ndarray:
-    """Growth for years 1..N: g∞ + (g₀ − g∞)·e^(−λt). Shape (n, horizon)."""
-    g0    = np.atleast_1d(np.asarray(g0, dtype=float))[:, None]
-    g_inf = np.atleast_1d(np.asarray(g_inf, dtype=float))[:, None]
+def fade(start, end, horizon: int, half_life: float) -> np.ndarray:
+    """end + (start − end)·e^(−λt) for t = 1..N. Shape (n, horizon)."""
+    start = np.atleast_1d(np.asarray(start, dtype=float))[:, None]
+    end   = np.atleast_1d(np.asarray(end, dtype=float))[:, None]
     lam   = math.log(2) / half_life
     t     = np.arange(1, horizon + 1, dtype=float)[None, :]
-    return g_inf + (g0 - g_inf) * np.exp(-lam * t)
+    return end + (start - end) * np.exp(-lam * t)
 
 
-def value_components(inp: DCFInputs, g0, g_inf, r) -> dict[str, np.ndarray]:
-    """
-    PV of explicit cash flows, PV of terminal value, enterprise value and equity
-    value per share, for arrays of (g₀, g∞, r) of equal length.
-    """
-    g0, g_inf, r = (np.atleast_1d(np.asarray(x, dtype=float)) for x in (g0, g_inf, r))
-    g_inf = np.minimum(g_inf, r - MIN_SPREAD)
+def value_components(inp: ValueDriverInputs, g0, g_inf, r, roic0, moat) -> dict[str, np.ndarray]:
+    """Explicit-period PV, terminal PV, EV and equity value per share, vectorised."""
+    g0, g_inf, r, roic0, moat = (
+        np.atleast_1d(np.asarray(x, dtype=float)) for x in (g0, g_inf, r, roic0, moat)
+    )
+    g_inf     = np.minimum(g_inf, r - MIN_SPREAD)
+    ronic_inf = np.maximum(r + moat * (roic0 - r), BOUNDS["roic"][0])
 
-    growth = fade_path(g0, g_inf, inp.horizon, inp.half_life)          # (n, N)
-    cf     = inp.base_cf * np.cumprod(1.0 + growth, axis=1)            # (n, N)
-    t      = np.arange(1, inp.horizon + 1, dtype=float)[None, :]
+    N      = inp.horizon
+    growth = fade(g0, g_inf, N, inp.half_life)                              # g_1..g_N
+    ronic  = np.maximum(fade(roic0, ronic_inf, N, inp.half_life), BOUNDS["roic"][0])
+
+    # NOPAT_1..NOPAT_{N+1}; year N+1 grows at g∞.
+    growth_ext = np.concatenate([growth, g_inf[:, None]], axis=1)
+    nopat      = inp.nopat0 * np.cumprod(1.0 + growth_ext, axis=1)          # (n, N+1)
+
+    invest = (nopat[:, 1:] - nopat[:, :-1]) / ronic                         # I_1..I_N
+    fcf    = nopat[:, :-1] - invest
+    t      = np.arange(1, N + 1, dtype=float)[None, :]
     disc   = (1.0 + r[:, None]) ** t
-    pv_explicit = (cf / disc).sum(axis=1)
-    tv          = cf[:, -1] * (1.0 + g_inf) / (r - g_inf)
+
+    pv_explicit = (fcf / disc).sum(axis=1)
+    tv          = nopat[:, -1] * (1.0 - g_inf / ronic_inf) / (r - g_inf)
     pv_terminal = tv / disc[:, -1]
     ev          = pv_explicit + pv_terminal
-    debt        = 0.0 if inp.equity_cash_flows else inp.net_debt
-    equity      = np.maximum(ev - debt, 0.0)
-    return {
-        "pv_explicit": pv_explicit, "pv_terminal": pv_terminal,
-        "ev": ev, "per_share": equity / inp.shares,
-    }
+    equity      = np.maximum(ev - inp.debt, 0.0)
+    return {"pv_explicit": pv_explicit, "pv_terminal": pv_terminal,
+            "ev": ev, "per_share": equity / inp.shares}
 
 
-def value_per_share(inp: DCFInputs, g0=None, g_inf=None, r=None) -> float:
-    """Scalar value at given (or base-case) assumptions."""
-    g0    = inp.g0 if g0 is None else g0
-    g_inf = inp.g_inf if g_inf is None else g_inf
-    r     = inp.discount_rate() if r is None else r
-    return float(value_components(inp, g0, g_inf, r)["per_share"][0])
+def value_per_share(inp: ValueDriverInputs, **overrides) -> float:
+    """Scalar value at the central assumptions, with any of g0/g_inf/r/roic0/moat overridden."""
+    args = {"g0": inp.g0, "g_inf": inp.g_inf, "r": inp.discount_rate(),
+            "roic0": inp.roic0, "moat": inp.moat}
+    args.update(overrides)
+    return float(value_components(inp, **args)["per_share"][0])
 
 
 # ── Sampling ──────────────────────────────────────────────────────────────────
 
-def sample_assumptions(inp: DCFInputs, n: int = N_SIMS, seed: int = 42) -> dict[str, np.ndarray]:
-    """Correlated, fat-tailed draws of (g₀, g∞, ERP, β) and the implied discount rate."""
+def sample_assumptions(inp: ValueDriverInputs, n: int = N_SIMS, seed: int = 42) -> dict[str, np.ndarray]:
+    """Correlated, fat-tailed draws of every variable, plus the implied discount rate."""
     rng = np.random.default_rng(seed)
     L   = np.linalg.cholesky(CORRELATION)
-    z   = rng.standard_normal((n, len(VARIABLES))) @ L.T              # corr = C
+    z   = rng.standard_normal((n, len(VARIABLES))) @ L.T          # correlation C
     w   = rng.chisquare(STUDENT_T_DOF, n)
     t   = z / np.sqrt(w / STUDENT_T_DOF)[:, None]
-    # A t_ν variable has variance ν/(ν−2); rescale so SIGMA is the standard deviation.
+    # A t_ν variable has variance ν/(ν−2); rescale so sigma is the standard deviation.
     t  *= math.sqrt((STUDENT_T_DOF - 2) / STUDENT_T_DOF)
 
-    centre = {"g0": inp.g0, "g_inf": inp.g_inf, "erp": inp.erp, "beta": inp.beta}
-    draws  = {}
+    centre, sigma = inp.centre(), inp.sigma()
+    draws = {}
     for i, name in enumerate(VARIABLES):
         lo, hi = BOUNDS[name]
-        draws[name] = np.clip(centre[name] + SIGMA[name] * t[:, i], lo, hi)
+        draws[name] = np.clip(centre[name] + sigma[name] * t[:, i], lo, hi)
     draws["r"] = inp.discount_rate(beta=draws["beta"], erp=draws["erp"])
     return draws
 
 
 # ── Calculus: sensitivities and reverse DCF ───────────────────────────────────
 
-def sensitivities(inp: DCFInputs, h: float = 1e-4) -> dict[str, Optional[float]]:
+def sensitivities(inp: ValueDriverInputs, h: float = 1e-4) -> dict[str, Optional[float]]:
     """
-    % change in base-case value per +1 percentage point in each input.
+    % change in base-case value per +1 percentage point (per +0.1 for moat).
 
-    Central difference: ∂V/∂θ ≈ [V(θ+h) − V(θ−h)] / 2h, error O(h²).
+    Central difference ∂V/∂θ ≈ [V(θ+h) − V(θ−h)] / 2h, error O(h²).
     """
     base = value_per_share(inp)
+    keys = ("discount_rate", "initial_growth", "terminal_growth", "roic", "moat_durability")
     if base <= 0:
-        return {"discount_rate": None, "initial_growth": None, "terminal_growth": None}
-    r, g0, gi = inp.discount_rate(), inp.g0, inp.g_inf
-
-    def pct_per_pp(dv_dtheta: float) -> float:
-        return dv_dtheta * 0.01 / base * 100
-
-    d_r  = (value_per_share(inp, r=r + h)      - value_per_share(inp, r=r - h))      / (2 * h)
-    d_g0 = (value_per_share(inp, g0=g0 + h)    - value_per_share(inp, g0=g0 - h))    / (2 * h)
-    d_gi = (value_per_share(inp, g_inf=gi + h) - value_per_share(inp, g_inf=gi - h)) / (2 * h)
-    return {
-        "discount_rate":   pct_per_pp(d_r),
-        "initial_growth":  pct_per_pp(d_g0),
-        "terminal_growth": pct_per_pp(d_gi),
-    }
+        return {k: None for k in keys}
+    params = {"discount_rate": ("r", inp.discount_rate(), 0.01),
+              "initial_growth": ("g0", inp.g0, 0.01),
+              "terminal_growth": ("g_inf", inp.g_inf, 0.01),
+              "roic": ("roic0", inp.roic0, 0.01),
+              "moat_durability": ("moat", inp.moat, 0.10)}
+    out = {}
+    for key, (arg, x, unit) in params.items():
+        d = (value_per_share(inp, **{arg: x + h}) - value_per_share(inp, **{arg: x - h})) / (2 * h)
+        out[key] = d * unit / base * 100
+    return out
 
 
 @dataclass
 class ImpliedGrowth:
     g0: Optional[float]
-    status: str                 # "solved" | "below_range" | "above_range" | "no_price"
+    status: str        # "solved" | "below_range" | "above_range" | "insensitive" | "no_price"
     iterations: int = 0
 
 
-def implied_initial_growth(inp: DCFInputs, price: Optional[float],
+def implied_initial_growth(inp: ValueDriverInputs, price: Optional[float],
                            lo: float = -0.30, hi: float = 0.80,
                            tol: float = 1e-6, max_iter: int = 60) -> ImpliedGrowth:
     """
     Starting growth g₀ at which base-case value equals `price` (reverse DCF).
 
-    Safeguarded Newton: f(g) = V(g) − price is increasing in g. Keep a bracket
-    [lo, hi] with f(lo) < 0 < f(hi); take the Newton step when it stays inside the
-    bracket, otherwise bisect. Converges quadratically near the root and can
-    never diverge.
+    Safeguarded Newton on f(g) = V(g) − price, keeping a sign-change bracket
+    [a, b]. V usually rises with g, but falls when ROIC < r (growth destroys
+    value) and is flat when ROIC = r, so the bracket does not assume a direction.
+    Newton steps are taken when they land inside the bracket, else bisection.
     """
     if not price or price <= 0:
         return ImpliedGrowth(None, "no_price")
@@ -235,26 +246,33 @@ def implied_initial_growth(inp: DCFInputs, price: Optional[float],
     def f(g: float) -> float:
         return value_per_share(inp, g0=g) - price
 
-    f_lo, f_hi = f(lo), f(hi)
-    if f_lo > 0:
-        return ImpliedGrowth(lo, "below_range")     # price below value even at lo growth
-    if f_hi < 0:
-        return ImpliedGrowth(hi, "above_range")     # price needs more than hi growth
+    a, b = lo, hi
+    fa, fb = f(a), f(b)
+    if fa * fb > 0:
+        rising = fb > fa
+        if abs(fb - fa) < 1e-9 * price:
+            return ImpliedGrowth(None, "insensitive")
+        # No sign change: price is outside what any growth in [lo, hi] supports.
+        too_high = (fa < 0 and fb < 0)
+        if too_high:
+            return ImpliedGrowth(hi if rising else lo, "above_range")
+        return ImpliedGrowth(lo if rising else hi, "below_range")
 
-    g = min(max(inp.g0, lo), hi)
+    g = min(max(inp.g0, a), b)
     for i in range(1, max_iter + 1):
         fg = f(g)
         if abs(fg) < tol * price:
             return ImpliedGrowth(g, "solved", i)
-        if fg < 0:
-            lo = g
+        if (fg < 0) == (fa < 0):
+            a, fa = g, fg
         else:
-            hi = g
+            b, fb = g, fg
         h = 1e-5
         slope = (f(g + h) - f(g - h)) / (2 * h)
-        step  = g - fg / slope if slope > 0 else None
-        g = step if step is not None and lo < step < hi else (lo + hi) / 2
-        if hi - lo < 1e-9:
+        step = g - fg / slope if slope != 0 else None
+        lo_b, hi_b = min(a, b), max(a, b)
+        g = step if step is not None and lo_b < step < hi_b else (a + b) / 2
+        if abs(b - a) < 1e-9:
             break
     return ImpliedGrowth(g, "solved", max_iter)
 
@@ -300,11 +318,12 @@ class ProbValuation:
     zero_equity_share: float = 0.0   # share of scenarios where debt ≥ EV
 
 
-def simulate(inp: DCFInputs, price: Optional[float], n: int = N_SIMS, seed: int = 42) -> ProbValuation:
-    draws = sample_assumptions(inp, n=n, seed=seed)
-    vals  = value_components(inp, draws["g0"], draws["g_inf"], draws["r"])["per_share"]
+def simulate(inp: ValueDriverInputs, price: Optional[float],
+             n: int = N_SIMS, seed: int = 42) -> ProbValuation:
+    d    = sample_assumptions(inp, n=n, seed=seed)
+    vals = value_components(inp, d["g0"], d["g_inf"], d["r"], d["roic"], d["moat"])["per_share"]
 
-    base = value_components(inp, inp.g0, inp.g_inf, inp.discount_rate())
+    base = value_components(inp, inp.g0, inp.g_inf, inp.discount_rate(), inp.roic0, inp.moat)
     ev   = float(base["ev"][0])
     p10, p25, p50, p75, p90 = np.percentile(vals, [10, 25, 50, 75, 90])
     prob = float(np.mean(vals > price)) if price and price > 0 else None
