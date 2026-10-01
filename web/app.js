@@ -62,7 +62,13 @@
 
   function verdictClass(verdict) {
     var v = String(verdict || '').toUpperCase();
-    if (v.indexOf('BUY') >= 0) { return 'pill pill--buy'; }
+    // Valuation verdicts are probability bands (see src/valuation/probabilistic.py);
+    // composite-score verdicts still use TOP PICK / BUY / HOLD / AVOID.
+    if (v.indexOf('UNDERVALUED') >= 0) { return 'pill pill--buy'; }
+    if (v.indexOf('OVERVALUED') >= 0) { return 'pill pill--sell'; }
+    if (v.indexOf('FAIRLY') >= 0) { return 'pill pill--hold'; }
+    if (v.indexOf('AVOID') >= 0) { return 'pill pill--sell'; }
+    if (v.indexOf('BUY') >= 0 || v.indexOf('TOP PICK') >= 0) { return 'pill pill--buy'; }
     if (v.indexOf('SELL') >= 0) { return 'pill pill--sell'; }
     if (v.indexOf('HOLD') >= 0) { return 'pill pill--hold'; }
     return 'pill pill--none';

@@ -52,6 +52,10 @@ def _money(v: Optional[float]) -> str:
 
 def _verdict_color(verdict: str) -> str:
     v = verdict.upper()
+    if "LIKELY UNDERVALUED" in v:              return _g(_b(verdict))
+    if "UNDERVALUED" in v:                     return _g(verdict)
+    if "FAIRLY" in v:                          return _y(verdict)
+    if "OVERVALUED" in v:                      return _r(verdict)
     if "STRONG BUY"  in v or "TOP PICK" in v: return _g(_b(verdict))
     if "BUY"         in v:                     return _g(verdict)
     if "HOLD"        in v:                     return _y(verdict)
@@ -262,7 +266,7 @@ def print_dcf_sensitivity(result: "DCFResult") -> None:
         print(row)
 
     print("  " + "─" * (14 + CW * len(tg_steps) + 2))
-    print(_d("  Green = STRONG BUY / BUY  |  Yellow = HOLD  |  Red = SELL / STRONG SELL"))
+    print(_d("  Green = undervalued (P > 60%)  |  Yellow = fairly valued  |  Red = overvalued (P < 40%)"))
     print(_d(f"  Base WACC={wacc_base*100:.1f}%  |  Base Terminal G={tg_base*100:.1f}%  "
              f"|  FCF CAGR={result.fcf_cagr*100:+.1f}%"))
     print()

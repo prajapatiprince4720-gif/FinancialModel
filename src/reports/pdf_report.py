@@ -102,9 +102,10 @@ def _filled_rect(pdf: FPDF, x, y, w, h, fill, radius: float = 0):
 
 def _verdict_color(verdict: str):
     v = verdict.upper()
-    if "STRONG BUY" in v or "TOP PICK" in v: return _GREEN
-    if "BUY"        in v:                     return (50, 160, 80)
-    if "HOLD"       in v:                     return (160, 120, 20)
+    if "LIKELY UNDERVALUED" in v or "TOP PICK" in v: return _GREEN
+    if "UNDERVALUED" in v or "BUY" in v:            return (50, 160, 80)
+    if "FAIRLY" in v or "HOLD" in v:                return (160, 120, 20)
+    if "NO PRICE" in v or "INSUFFICIENT" in v:      return (120, 120, 120)
     return _RED
 
 

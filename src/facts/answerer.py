@@ -205,12 +205,22 @@ def _valuation_answer(sheet: FactSheet) -> Optional[str]:
     if not v.get("intrinsic_value"):
         return None
     text = (f"The {v['model']} model estimates {possessive(sheet.name)} intrinsic value at "
-            f"₹{v['intrinsic_value']:,.0f} per share, with an 80% range of "
-            f"₹{v['iv_low']:,.0f}–₹{v['iv_high']:,.0f} across simulated assumptions "
+            f"₹{v['intrinsic_value']:,.0f} per share (median of 10,000 simulated scenarios), "
+            f"with an 80% range of ₹{v['iv_low']:,.0f}–₹{v['iv_high']:,.0f} "
             f"(discount rate {v['discount_rate']*100:.1f}%).")
     price = sheet.market.get("price")
     if price:
-        text += f" The current price is ₹{price:,.2f}."
+        text += f" The current price is ₹{price:,.2f}"
+        if v.get("prob_undervalued") is not None:
+            text += (f"; the model value exceeds it in {v['prob_undervalued']*100:.0f}% "
+                     f"of scenarios")
+        text += "."
+    if v.get("implied_status") == "solved" and v.get("implied_growth") is not None:
+        text += (f" Working backwards, today's price implies starting cash-flow growth of "
+                 f"{v['implied_growth']*100:.1f}% a year")
+        if v.get("historical_growth") is not None:
+            text += f", against {v['historical_growth']*100:.1f}% estimated from history"
+        text += "."
     text += (" A model estimate is sensitive to its growth and discount-rate inputs and "
              "is not a price target.")
     return text

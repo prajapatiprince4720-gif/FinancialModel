@@ -222,15 +222,8 @@ class ResearchService:
             return None
         sheet = copy.deepcopy(sheet)
         if with_valuation:
-            v = self.valuation(sym)
-            if v.intrinsic_value > 0:
-                sheet.valuation = {
-                    "model": v.model, "intrinsic_value": v.intrinsic_value,
-                    "iv_low": v.iv_low, "iv_high": v.iv_high,
-                    "margin_of_safety": v.margin_of_safety,
-                    "discount_rate": v.wacc, "verdict": v.verdict,
-                    "notes": list(v.notes or []),
-                }
+            from src.facts.fact_sheet import valuation_summary
+            sheet.valuation = valuation_summary(self.valuation(sym))
         return sheet
 
     # ── Freshness ─────────────────────────────────────────────────────────────
@@ -315,6 +308,15 @@ class ResearchService:
                 "shares_cr":        dcf.shares_cr,
                 "verdict":          dcf.verdict,
                 "notes":            list(dcf.notes or []),
+                # Probabilistic outputs: intrinsic_value is the simulation median.
+                "prob_undervalued": dcf.prob_undervalued,
+                "iv_p25":           dcf.iv_p25,
+                "iv_p75":           dcf.iv_p75,
+                "iv_base":          dcf.iv_base,
+                "implied_growth":   dcf.implied_growth,
+                "implied_status":   dcf.implied_status,
+                "sensitivities":    dict(dcf.sensitivities or {}),
+                "terminal_share":   dcf.terminal_share,
             },
             "score": None,
             "macro": self.macro(),

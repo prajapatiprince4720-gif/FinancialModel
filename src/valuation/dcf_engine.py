@@ -17,6 +17,7 @@ from typing import Optional
 import numpy as np
 
 from src.data.company import BANKS, INSURERS, LENDERS, NBFCS, CompanyData, load_company
+from src.valuation.probabilistic import DCFInputs, simulate, verdict_from_probability
 
 _PRICE_CACHE: dict[str, Optional[float]] = {}
 _PRICE_CACHE_FILE = Path("data/raw/nse/live_prices.json")
@@ -183,6 +184,17 @@ class DCFResult:
     rf_source:        str   = ""      # where that rate came from
     rf_is_live:       bool  = False   # False => valuation rests on a stale rate
     rf_label:         str   = ""      # one-line provenance for report footers
+    # ── Probabilistic outputs (see src/valuation/probabilistic.py) ──
+    # intrinsic_value is the MEDIAN of the simulated distribution; iv_low/iv_high
+    # are P10/P90. prob_undervalued = P(value > price).
+    prob_undervalued: Optional[float] = None
+    iv_p25:           float = 0.0
+    iv_p75:           float = 0.0
+    iv_base:          float = 0.0     # value at central assumptions (no simulation)
+    implied_growth:   Optional[float] = None   # reverse DCF: starting growth priced in
+    implied_status:   str   = ""
+    sensitivities:    dict  = field(default_factory=dict)  # % value change per +1pp
+    terminal_share:   float = 0.0     # share of value from the terminal period
 
 
 class DCFEngine:
@@ -328,50 +340,39 @@ class DCFEngine:
         if base_fcf <= 0:
             return self._empty(symbol, "No positive FCF/CFO baseline")
 
-        # NP-proxy DCF is already an equity model (post-interest) — don't double-deduct debt.
+        # NP-proxy DCF is already an equity model (post-interest) — don't double-deduct
+        # debt, and discount at the cost of equity, not WACC (equity cash flows
+        # belong to shareholders alone; WACC understated their required return).
         # FCF/CFO DCF is an enterprise model — subtract net debt to get equity value.
         net_debt_cr = 0.0 if using_np_proxy else max(0.0, total_debt_cr * 0.85)
+        if using_np_proxy:
+            notes.append(f"Equity cash flows discounted at cost of equity {cost_equity:.1%}")
 
-        pv_fcf, pv_tv = self._dcf_calc(base_fcf, fcf_cagr, wacc, _TERM_G, _PROJ_YR)
-        total_iv_cr   = pv_fcf + pv_tv
-        equity_iv_cr  = total_iv_cr - net_debt_cr
-
-        ev_mode = False
-        if equity_iv_cr <= 0:
-            equity_iv_cr = total_iv_cr
-            ev_mode = True
-            notes.append("EV basis — total debt exceeds DCF value (capex-heavy cycle)")
-
-        iv_per_share = equity_iv_cr / shares_cr
-
-        rng       = np.random.default_rng(42)
-        g_samples = rng.normal(fcf_cagr, 0.04, _MC_SIMS).clip(-0.06, 0.30)
-        w_samples = rng.normal(wacc,     0.015, _MC_SIMS).clip(0.07, 0.22)
-
-        mc_ivs = []
-        for g, w in zip(g_samples, w_samples):
-            if w <= _TERM_G:
-                continue
-            pf, pt = self._dcf_calc(base_fcf, g, w, _TERM_G, _PROJ_YR)
-            eq_iv  = (pf + pt) - net_debt_cr
-            if ev_mode or eq_iv <= 0:
-                eq_iv = pf + pt
-            mc_ivs.append(eq_iv / shares_cr)
-
-        mc_arr  = np.array(mc_ivs)
-        iv_low  = float(np.percentile(mc_arr, 10))
-        iv_high = float(np.percentile(mc_arr, 90))
-
-        mos = (iv_per_share - cmp) / cmp if cmp and cmp > 0 and iv_per_share > 0 else None
+        inputs = DCFInputs(
+            base_cf=base_fcf, g0=fcf_cagr, rf=self._rf_rate, beta=beta, erp=_ERP,
+            shares=shares_cr, net_debt=net_debt_cr,
+            w_equity=we, w_debt=wd, kd_after_tax=cost_debt * (1 - avg_tax),
+            equity_cash_flows=using_np_proxy, g_inf=_TERM_G, horizon=_PROJ_YR,
+        )
+        pv = simulate(inputs, cmp)
+        if pv.zero_equity_share > 0.10:
+            notes.append(f"Debt exceeds enterprise value in {pv.zero_equity_share:.0%} of scenarios")
 
         return DCFResult(
             symbol=symbol, cmp=cmp,
-            intrinsic_value=round(iv_per_share, 2),
-            iv_low=round(iv_low, 2), iv_high=round(iv_high, 2),
-            margin_of_safety=mos, wacc=wacc, fcf_cagr=fcf_cagr,
-            terminal_value=round(pv_tv, 2), pv_fcf=round(pv_fcf, 2),
-            shares_cr=shares_cr, verdict=self._verdict(mos, iv_per_share),
+            intrinsic_value=round(pv.median, 2),
+            iv_low=round(pv.p10, 2), iv_high=round(pv.p90, 2),
+            margin_of_safety=(pv.median - cmp) / cmp if cmp and cmp > 0 else None,
+            wacc=pv.discount_rate, fcf_cagr=fcf_cagr,
+            terminal_value=round(pv.pv_terminal, 2), pv_fcf=round(pv.pv_explicit, 2),
+            shares_cr=shares_cr,
+            verdict=self._prob_verdict(pv.prob_undervalued, pv.median),
             model="DCF", notes=notes, **self._rf_fields(),
+            prob_undervalued=pv.prob_undervalued,
+            iv_p25=round(pv.p25, 2), iv_p75=round(pv.p75, 2), iv_base=round(pv.base_case, 2),
+            implied_growth=pv.implied.g0 if pv.implied else None,
+            implied_status=pv.implied.status if pv.implied else "",
+            sensitivities=pv.sensitivities, terminal_share=pv.terminal_share,
         )
 
     # ── P/E relative model for listed life insurers ───────────────────────────
@@ -406,10 +407,7 @@ class DCFEngine:
         eps_draws = rng.normal(avg_eps, avg_eps * 0.10, _MC_SIMS).clip(avg_eps * 0.5, avg_eps * 2.0)
         mc_arr    = pe_draws * eps_draws
 
-        iv_low  = float(np.percentile(mc_arr, 10))
-        iv_high = float(np.percentile(mc_arr, 90))
-
-        mos  = (iv_per_share - cmp) / cmp if cmp and cmp > 0 else None
+        dist = self._distribution(mc_arr, cmp)
         beta = _SECTOR_BETA.get("INSURANCE", 0.85)
         coe  = self._rf_rate + beta * _ERP
 
@@ -420,15 +418,21 @@ class DCFEngine:
 
         return DCFResult(
             symbol=symbol, cmp=cmp,
-            intrinsic_value=round(iv_per_share, 2),
-            iv_low=round(iv_low, 2), iv_high=round(iv_high, 2),
-            margin_of_safety=mos, wacc=coe,
+            intrinsic_value=round(dist["median"], 2),
+            iv_low=round(dist["p10"], 2), iv_high=round(dist["p90"], 2),
+            margin_of_safety=(dist["median"] - cmp) / cmp if cmp and cmp > 0 else None,
+            wacc=coe,
             fcf_cagr=avg_eps,
             terminal_value=0.0,
             pv_fcf=round(iv_per_share, 2),
             shares_cr=shares_cr,
-            verdict=self._verdict(mos, iv_per_share),
+            verdict=self._prob_verdict(dist["prob"], dist["median"]),
             model="PE", notes=notes, **self._rf_fields(),
+            prob_undervalued=dist["prob"],
+            iv_p25=round(dist["p25"], 2), iv_p75=round(dist["p75"], 2),
+            iv_base=round(iv_per_share, 2),
+            # Value is linear in the multiple: +1x P/E → +1/62 of value.
+            sensitivities={"sector_pe_plus_1x": 100 / _INSURANCE_SECTOR_PE},
         )
 
     # ── Residual Income Model for banks & NBFCs ───────────────────────────────
@@ -486,14 +490,24 @@ class DCFEngine:
         proj_yr = _BANK_PROJ_YR  # 15Y horizon — banks are slow-mean-reverting
 
         # ── Base-case RIM ─────────────────────────────────────────────────────
-        pv_ri, bv_n = self._rim_calc(bv0, roe0, roe_term, coe, retention, proj_yr)
+        def rim(coe_: float, roe_term_: float) -> tuple[float, float, float]:
+            pv_ri_, bv_n_ = self._rim_calc(bv0, roe0, roe_term_, coe_, retention, proj_yr)
+            ri_term_ = (roe_term_ - coe_) * bv_n_
+            pv_tv_ = 0.0
+            if coe_ > _TERM_G and ri_term_ > 0:
+                pv_tv_ = (ri_term_ / (coe_ - _TERM_G)) / (1 + coe_) ** proj_yr
+            return bv0 + pv_ri_ + pv_tv_, pv_ri_, pv_tv_
 
-        ri_term = (roe_term - coe) * bv_n
-        pv_tv   = 0.0
-        if coe > _TERM_G and ri_term > 0:
-            pv_tv = (ri_term / (coe - _TERM_G)) / (1 + coe) ** proj_yr
+        iv_per_share, pv_ri, pv_tv = rim(coe, roe_term)
 
-        iv_per_share = bv0 + pv_ri + pv_tv
+        # Sensitivities by central difference: % value change per +1pp.
+        h = 1e-4
+        sens = {}
+        if iv_per_share > 0:
+            d_coe = (rim(coe + h, roe_term)[0] - rim(coe - h, roe_term)[0]) / (2 * h)
+            d_roe = (rim(coe, roe_term + h)[0] - rim(coe, roe_term - h)[0]) / (2 * h)
+            sens = {"discount_rate":  d_coe * 0.01 / iv_per_share * 100,
+                    "long_run_roe":   d_roe * 0.01 / iv_per_share * 100}
 
         # ── Vectorised Monte Carlo ────────────────────────────────────────────
         rng         = np.random.default_rng(42)
@@ -522,11 +536,8 @@ class DCFEngine:
             0.0,
         )
 
-        mc_arr  = bv0 + pv_ri_mc + pv_tv_mc
-        iv_low  = float(np.percentile(mc_arr, 10))
-        iv_high = float(np.percentile(mc_arr, 90))
-
-        mos = (iv_per_share - cmp) / cmp if cmp and cmp > 0 and iv_per_share > 0 else None
+        mc_arr = bv0 + pv_ri_mc + pv_tv_mc
+        dist   = self._distribution(mc_arr, cmp)
 
         notes.append(
             f"Residual Income Model  |  ROE={roe0:.1%}  CoE={coe:.1%}  "
@@ -535,15 +546,20 @@ class DCFEngine:
 
         return DCFResult(
             symbol=symbol, cmp=cmp,
-            intrinsic_value=round(iv_per_share, 2),
-            iv_low=round(iv_low, 2), iv_high=round(iv_high, 2),
-            margin_of_safety=mos, wacc=coe,
+            intrinsic_value=round(dist["median"], 2),
+            iv_low=round(dist["p10"], 2), iv_high=round(dist["p90"], 2),
+            margin_of_safety=(dist["median"] - cmp) / cmp if cmp and cmp > 0 else None,
+            wacc=coe,
             fcf_cagr=roe0,
             terminal_value=round(pv_tv, 2),
             pv_fcf=round(pv_ri, 2),
             shares_cr=shares_cr,
-            verdict=self._verdict(mos, iv_per_share),
+            verdict=self._prob_verdict(dist["prob"], dist["median"]),
             model="RIM", notes=notes, **self._rf_fields(),
+            prob_undervalued=dist["prob"],
+            iv_p25=round(dist["p25"], 2), iv_p75=round(dist["p75"], 2),
+            iv_base=round(iv_per_share, 2), sensitivities=sens,
+            terminal_share=pv_tv / iv_per_share if iv_per_share > 0 else 0.0,
         )
 
     # ── Shared calculation helpers ────────────────────────────────────────────
@@ -621,6 +637,20 @@ class DCFEngine:
             pv_fcf=0.0, shares_cr=0.0, verdict="INSUFFICIENT_DATA",
             model="N/A", notes=[reason], **self._rf_fields(),
         )
+
+    @staticmethod
+    def _prob_verdict(prob: Optional[float], iv: float) -> str:
+        if iv <= 0:
+            return "INSUFFICIENT_DATA"
+        return verdict_from_probability(prob)
+
+    @staticmethod
+    def _distribution(mc_arr: np.ndarray, cmp: Optional[float]) -> dict:
+        """Median, quartiles, P10/P90 and P(value > price) from simulated values."""
+        p10, p25, p50, p75, p90 = np.percentile(mc_arr, [10, 25, 50, 75, 90])
+        prob = float(np.mean(mc_arr > cmp)) if cmp and cmp > 0 else None
+        return {"median": float(p50), "p10": float(p10), "p25": float(p25),
+                "p75": float(p75), "p90": float(p90), "prob": prob}
 
     def _verdict(self, mos: Optional[float], iv: float) -> str:
         if iv <= 0:

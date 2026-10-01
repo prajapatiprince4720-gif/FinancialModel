@@ -289,10 +289,29 @@ class FactSheet:
         v = self.valuation
         if v.get("intrinsic_value"):
             lines.append(
-                f"Valuation ({v['model']}): intrinsic value ₹{v['intrinsic_value']:,.0f} "
-                f"(P10–P90 ₹{v['iv_low']:,.0f}–₹{v['iv_high']:,.0f}); "
+                f"Valuation ({v['model']}, 10,000 simulated scenarios): median intrinsic value "
+                f"₹{v['intrinsic_value']:,.0f}; 50% range ₹{v['iv_p25']:,.0f}–₹{v['iv_p75']:,.0f}; "
+                f"80% range ₹{v['iv_low']:,.0f}–₹{v['iv_high']:,.0f}; "
                 f"discount rate {v['discount_rate']*100:.1f}%; model verdict {v['verdict']}."
             )
+            if v.get("prob_undervalued") is not None:
+                lines.append(
+                    f"Probability the model value exceeds the price: "
+                    f"{v['prob_undervalued']*100:.0f}% (model-based, not a forecast of returns)."
+                )
+            if v.get("implied_status") == "solved" and v.get("implied_growth") is not None:
+                hist = v.get("historical_growth")
+                lines.append(
+                    f"Reverse DCF: the price implies starting cash-flow growth of "
+                    f"{v['implied_growth']*100:.1f}% a year fading to the long-run rate"
+                    + (f", vs {hist*100:.1f}% estimated from history." if hist is not None else ".")
+                )
+            sens = v.get("sensitivities") or {}
+            names = {"discount_rate": "discount rate", "initial_growth": "starting growth",
+                     "terminal_growth": "long-run growth", "long_run_roe": "long-run ROE"}
+            parts = [f"{names[k]} {s:+.1f}%" for k, s in sens.items() if k in names and s is not None]
+            if parts:
+                lines.append("Value change per +1 percentage point: " + "; ".join(parts) + ".")
         s = self.score
         if s.get("composite") is not None:
             lines.append(
@@ -385,6 +404,29 @@ def _quality_flags(cd: CompanyData, market: dict[str, Any], metrics: dict[str, A
     return flags
 
 
+def valuation_summary(v: Any) -> dict[str, Any]:
+    """The fact-sheet view of a DCFResult; {} when no valuation was possible."""
+    if v is None or getattr(v, "intrinsic_value", 0) <= 0:
+        return {}
+    return {
+        "model": v.model,
+        "intrinsic_value": v.intrinsic_value,       # median of the simulation
+        "iv_low": v.iv_low, "iv_high": v.iv_high,   # P10 / P90
+        "iv_p25": v.iv_p25, "iv_p75": v.iv_p75,
+        "iv_base": v.iv_base,
+        "prob_undervalued": v.prob_undervalued,
+        "margin_of_safety": v.margin_of_safety,
+        "discount_rate": v.wacc,
+        "historical_growth": v.fcf_cagr if v.model == "DCF" else None,
+        "implied_growth": v.implied_growth,
+        "implied_status": v.implied_status,
+        "sensitivities": dict(v.sensitivities or {}),
+        "terminal_share": v.terminal_share,
+        "verdict": v.verdict,
+        "notes": list(v.notes or []),
+    }
+
+
 # ── Builder ───────────────────────────────────────────────────────────────────
 
 def build_fact_sheets(
@@ -431,14 +473,8 @@ def build_fact_sheets(
                                        sheet.data_as_of, fresh.get("age_days"))
 
         v = valuations.get(sym)
-        if v is not None and getattr(v, "intrinsic_value", 0) > 0:
-            sheet.valuation = {
-                "model": v.model, "intrinsic_value": v.intrinsic_value,
-                "iv_low": v.iv_low, "iv_high": v.iv_high,
-                "margin_of_safety": v.margin_of_safety,
-                "discount_rate": v.wacc, "verdict": v.verdict,
-                "notes": list(v.notes or []),
-            }
+        if v is not None:
+            sheet.valuation = valuation_summary(v)
         sheets[sym] = sheet
 
     _attach_scores(sheets, scores)

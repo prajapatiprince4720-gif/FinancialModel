@@ -37,11 +37,13 @@ _RED   = RGBColor(0xB0, 0x2A, 0x2A)
 _GREEN = RGBColor(0x1A, 0x7F, 0x37)
 
 _VERDICT_COLOURS = {
-    "STRONG BUY": _GREEN,
-    "BUY":        _GREEN,
-    "HOLD":       _GOLD,
-    "SELL":       _RED,
-    "STRONG SELL": _RED,
+    "LIKELY UNDERVALUED": _GREEN,
+    "LEANS UNDERVALUED":  _GREEN,
+    "FAIRLY VALUED":      _GOLD,
+    "LEANS OVERVALUED":   _RED,
+    "LIKELY OVERVALUED":  _RED,
+    # Composite-score verdicts
+    "TOP PICK": _GREEN, "BUY": _GREEN, "HOLD": _GOLD, "AVOID": _RED,
 }
 
 
