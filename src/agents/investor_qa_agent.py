@@ -102,10 +102,11 @@ class InvestorQAAgent:
         Returns yfinance ticker like 'RELIANCE.NS', or '' if none found.
         """
         q_lower = question.lower()
-        # Longest match wins (avoids "TCS" matching inside "TATACS")
+        # Whole-word matches only: a bare substring test sent "result" to LT and
+        # "below" to BEL. Longest match wins ("hdfc bank" over a shorter alias).
         matches: list[tuple[int, str]] = []
         for name_or_sym, symbol in _NAME_TO_SYMBOL.items():
-            if name_or_sym in q_lower:
+            if re.search(rf"(?<![a-z0-9]){re.escape(name_or_sym)}(?![a-z0-9])", q_lower):
                 matches.append((len(name_or_sym), symbol))
         if matches:
             matches.sort(reverse=True)

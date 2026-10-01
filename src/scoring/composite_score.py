@@ -296,24 +296,39 @@ class CompositeScorer:
 
     def _rank_and_score(self, raw: dict[str, dict], all_syms: list[str]) -> list[ScoreResult]:
         syms = list(raw.keys())
-        n    = len(syms)
+        # Peer group per symbol. Lenders store ROE/NIM/ROA/margin/bank-Piotroski in
+        # the same fields non-lenders use for ROCE/OPM/IntCov/CFO-NP/Piotroski, and
+        # a bank's 4% NIM ranked against a manufacturer's 20% OPM always lands at
+        # the bottom. Those metrics are therefore ranked within the peer group.
+        groups = np.array([raw[s]["is_bank"] for s in syms])
 
-        def _pct(vals: list[float], higher_better: bool = True) -> list[float]:
-            arr   = np.array(vals, dtype=float)
+        def _rank(arr: np.ndarray) -> np.ndarray:
             ranks = np.array([np.sum(arr < v) for v in arr], dtype=float)
-            pcts  = ranks / max(n - 1, 1) * 100
+            return ranks / max(len(arr) - 1, 1) * 100
+
+        def _pct(vals: list[float], higher_better: bool = True,
+                 by_peer: bool = False) -> np.ndarray:
+            arr  = np.array(vals, dtype=float)
+            pcts = np.empty_like(arr)
+            if by_peer:
+                for g in (True, False):
+                    mask = groups == g
+                    if mask.any():
+                        pcts[mask] = _rank(arr[mask])
+            else:
+                pcts = _rank(arr)
             return pcts if higher_better else (100 - pcts)
 
-        roce_pct = _pct([raw[s]["roce_3y"]       for s in syms])
-        opm_pct  = _pct([raw[s]["opm_3y"]        for s in syms])
-        de_pct   = _pct([raw[s]["de_ratio"]       for s in syms], higher_better=False)
-        ic_pct   = _pct([raw[s]["int_cov"]        for s in syms])
+        roce_pct = _pct([raw[s]["roce_3y"]       for s in syms], by_peer=True)
+        opm_pct  = _pct([raw[s]["opm_3y"]        for s in syms], by_peer=True)
+        de_pct   = _pct([raw[s]["de_ratio"]       for s in syms], higher_better=False, by_peer=True)
+        ic_pct   = _pct([raw[s]["int_cov"]        for s in syms], by_peer=True)
         rev_pct  = _pct([raw[s]["rev_cagr"]       for s in syms])
         eps_pct  = _pct([raw[s]["eps_cagr"]       for s in syms])
         fcf_pct  = _pct([raw[s]["fcf_cagr"]       for s in syms])
-        cfo_pct  = _pct([raw[s]["cfo_np_ratio"]   for s in syms])
-        acc_pct  = _pct([raw[s]["accrual_ratio"]  for s in syms], higher_better=False)
-        pio_pct  = _pct([raw[s]["piotroski"]      for s in syms])
+        cfo_pct  = _pct([raw[s]["cfo_np_ratio"]   for s in syms], by_peer=True)
+        acc_pct  = _pct([raw[s]["accrual_ratio"]  for s in syms], higher_better=False, by_peer=True)
+        pio_pct  = _pct([raw[s]["piotroski"]      for s in syms], by_peer=True)
 
         results = []
         for i, sym in enumerate(syms):
