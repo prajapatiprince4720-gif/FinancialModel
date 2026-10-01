@@ -22,8 +22,7 @@ from typing import Optional
 import numpy as np
 
 
-from src.utils.macro_rates import get_rf_rate as _get_rf_rate
-_RF_RATE      = _get_rf_rate()   # India 10Y GSEC yield (live, 24h cache)
+from src.utils.macro_rates import RFContext, get_rf_context
 _N_PORT       = 10_000     # Monte Carlo portfolios (doubled for better coverage)
 _MIN_W        = 0.04       # min weight per stock (4%)
 _MAX_W        = 0.35       # max weight per stock (35%)
@@ -120,8 +119,12 @@ class PortfolioOptimizer:
     Uses sector-based correlation matrix and sector concentration cap.
     """
 
-    def __init__(self, cache_dir: str = "data/raw/screener"):
+    def __init__(self, cache_dir: str = "data/raw/screener",
+                 rf_context: RFContext | None = None, quiet: bool = False):
         self.cache_dir = Path(cache_dir)
+        # Resolved per instance, not at import: a long-running web process must
+        # pick up a new rate when the 24 h macro cache rolls over.
+        self.rf = rf_context or get_rf_context(quiet=quiet)
 
     def optimize(
         self,
@@ -192,7 +195,7 @@ class PortfolioOptimizer:
             port_ret = float(mu @ w)
             port_var = float(w @ cov @ w)
             port_vol = float(np.sqrt(max(port_var, 0)))
-            sharpe   = (port_ret - _RF_RATE) / port_vol if port_vol > 0 else 0
+            sharpe   = (port_ret - self.rf.rate) / port_vol if port_vol > 0 else 0
 
             if sharpe > best_sharpe:
                 best_sharpe = sharpe
@@ -201,7 +204,7 @@ class PortfolioOptimizer:
         # ── Build output ─────────────────────────────────────────────────────
         port_ret = float(mu @ best_w)
         port_vol = float(np.sqrt(best_w @ cov @ best_w))
-        sharpe   = (port_ret - _RF_RATE) / port_vol if port_vol > 0 else 0
+        sharpe   = (port_ret - self.rf.rate) / port_vol if port_vol > 0 else 0
         mdd_est  = min(port_vol * 2.0, 0.60)
 
         allocs = []

@@ -82,8 +82,7 @@ def _fetch_cmp(symbol: str) -> Optional[float]:
 
 # ── India macro constants ──────────────────────────────────────────────────────
 # RF_RATE is fetched live from NSE/yfinance (24h cache) — never hardcoded.
-from src.utils.macro_rates import get_rf_rate as _get_rf_rate
-_RF_RATE  = _get_rf_rate()   # India 10Y GSEC yield (live, refreshed daily)
+from src.utils.macro_rates import RFContext, get_rf_context
 _ERP      = 0.055            # India Equity Risk Premium (Damodaran estimate)
 _TERM_G   = 0.055            # Terminal growth rate (long-run nominal GDP)
 _PROJ_YR  = 10               # Projection horizon
@@ -178,13 +177,39 @@ class DCFResult:
     verdict:          str
     model:            str = "DCF"     # "DCF" or "RIM"
     notes:            list[str] = field(default_factory=list)
+    rf_rate:          float = 0.0     # risk-free rate actually used
+    rf_source:        str   = ""      # where that rate came from
+    rf_is_live:       bool  = False   # False => valuation rests on a stale rate
+    rf_label:         str   = ""      # one-line provenance for report footers
 
 
 class DCFEngine:
-    """Computes intrinsic value per share from cached Screener.in data."""
+    """
+    Computes intrinsic value per share from cached Screener.in data.
 
-    def __init__(self, cache_dir: str = "data/raw/screener"):
+    The risk-free rate is resolved once per engine instance rather than at
+    import time, so a long-running process (the web API) picks up a new rate
+    when the 24 h macro cache rolls over, and importing this module never
+    triggers a network call.
+    """
+
+    def __init__(self, cache_dir: str = "data/raw/screener",
+                 rf_context: RFContext | None = None, quiet: bool = False):
         self.cache_dir = Path(cache_dir)
+        self.rf = rf_context or get_rf_context(quiet=quiet)
+
+    @property
+    def _rf_rate(self) -> float:
+        return self.rf.rate
+
+    def _rf_fields(self) -> dict:
+        """Provenance kwargs stamped onto every DCFResult this engine produces."""
+        return {
+            "rf_rate":    self.rf.rate,
+            "rf_source":  self.rf.source,
+            "rf_is_live": self.rf.is_live,
+            "rf_label":   self.rf.label,
+        }
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -237,7 +262,7 @@ class DCFEngine:
             return self._empty(symbol, "Cannot determine share count")
 
         beta        = _SECTOR_BETA.get(_SYM_SECTOR.get(symbol, "DEFAULT"), 1.0)
-        cost_equity = _RF_RATE + beta * _ERP
+        cost_equity = self._rf_rate + beta * _ERP
 
         avg_borr = self._tail_avg(borr_ser, 3)
         avg_int  = self._tail_avg(interest, 3)
@@ -353,7 +378,7 @@ class DCFEngine:
             margin_of_safety=mos, wacc=wacc, fcf_cagr=fcf_cagr,
             terminal_value=round(pv_tv, 2), pv_fcf=round(pv_fcf, 2),
             shares_cr=shares_cr, verdict=self._verdict(mos, iv_per_share),
-            model="DCF", notes=notes,
+            model="DCF", notes=notes, **self._rf_fields(),
         )
 
     # ── P/E relative model for listed life insurers ───────────────────────────
@@ -403,7 +428,7 @@ class DCFEngine:
 
         mos  = (iv_per_share - cmp) / cmp if cmp and cmp > 0 else None
         beta = _SECTOR_BETA.get("INSURANCE", 0.85)
-        coe  = _RF_RATE + beta * _ERP
+        coe  = self._rf_rate + beta * _ERP
 
         notes.append(
             f"P/E Relative model  |  3Y-avg EPS=₹{avg_eps:.1f}  "
@@ -420,7 +445,7 @@ class DCFEngine:
             pv_fcf=round(iv_per_share, 2),
             shares_cr=shares_cr,
             verdict=self._verdict(mos, iv_per_share),
-            model="PE", notes=notes,
+            model="PE", notes=notes, **self._rf_fields(),
         )
 
     # ── Residual Income Model for banks & NBFCs ───────────────────────────────
@@ -480,7 +505,7 @@ class DCFEngine:
 
         # Cost of Equity
         beta = _SECTOR_BETA.get(_SYM_SECTOR.get(symbol, "DEFAULT"), 1.0)
-        coe  = _RF_RATE + beta * _ERP
+        coe  = self._rf_rate + beta * _ERP
 
         # Retention ratio (1 - payout)
         avg_payout = self._tail_avg(div_payout, 3) / 100 if div_payout else 0.25
@@ -549,7 +574,7 @@ class DCFEngine:
             pv_fcf=round(pv_ri, 2),
             shares_cr=shares_cr,
             verdict=self._verdict(mos, iv_per_share),
-            model="RIM", notes=notes,
+            model="RIM", notes=notes, **self._rf_fields(),
         )
 
     # ── Shared calculation helpers ────────────────────────────────────────────
@@ -635,7 +660,7 @@ class DCFEngine:
             iv_low=0.0, iv_high=0.0, margin_of_safety=None,
             wacc=0.0, fcf_cagr=0.0, terminal_value=0.0,
             pv_fcf=0.0, shares_cr=0.0, verdict="INSUFFICIENT_DATA",
-            model="N/A", notes=[reason],
+            model="N/A", notes=[reason], **self._rf_fields(),
         )
 
     def _verdict(self, mos: Optional[float], iv: float) -> str:
