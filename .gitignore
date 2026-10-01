@@ -64,3 +64,6 @@ htmlcov/
 # Generated report output
 reports/exports/
 reports/*_EquityResearch_*.pdf
+
+# Point-in-time snapshot history (local data, regenerable from Screener)
+data/snapshots/

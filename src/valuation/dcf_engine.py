@@ -10,10 +10,13 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+from src.data.company import BANKS, INSURERS, LENDERS, NBFCS, CompanyData, load_company
 
 _PRICE_CACHE: dict[str, Optional[float]] = {}
 _PRICE_CACHE_FILE = Path("data/raw/nse/live_prices.json")
@@ -128,17 +131,13 @@ _SYM_SECTOR: dict[str, str] = {
 }
 
 # Symbols routed to Residual Income Model instead of FCF-DCF
-_BANK_SYMBOLS: set[str] = {
-    "HDFCBANK", "ICICIBANK", "AXISBANK", "KOTAKBANK", "SBIN", "INDUSINDBK",
-}
-_NBFC_SYMBOLS: set[str] = {
-    "BAJFINANCE", "SHRIRAMFIN", "BAJAJFINSV",
-}
-_FIN_SECTOR: set[str] = _BANK_SYMBOLS | _NBFC_SYMBOLS
+_BANK_SYMBOLS = BANKS
+_NBFC_SYMBOLS = NBFCS
+_FIN_SECTOR   = LENDERS
 
 # Insurance: P/E relative model — CFO includes policyholder premiums (inflated),
 # so DCF gives nonsensical STRONG BUY (+150%). Sector trades at ~62x trailing P/E.
-_INSURANCE_SYMBOLS: set[str] = {"HDFCLIFE", "SBILIFE"}
+_INSURANCE_SYMBOLS = INSURERS
 _INSURANCE_SECTOR_PE = 62.0   # Indian listed life insurers trailing P/E anchor
 _INSURANCE_PE_SIGMA  = 12.0   # ±1σ P/E band (~50–74x historically observed)
 
@@ -213,47 +212,38 @@ class DCFEngine:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def value(self, symbol: str) -> DCFResult:
-        data = self._load(symbol)
-        if data is None:
+    def value(self, symbol: str, as_of: datetime | str | None = None) -> DCFResult:
+        """
+        Value `symbol` from current data, or from the snapshot observed at `as_of`.
+
+        Note `as_of` pins the fundamentals only; price and risk-free rate are
+        whatever this engine was given.
+        """
+        cd = load_company(symbol, as_of=as_of, cache_dir=self.cache_dir)
+        if cd is None:
             return self._empty(symbol, "No cached data")
 
         if symbol in _INSURANCE_SYMBOLS:
-            return self._insurance_pe_value(symbol, data)
+            return self._insurance_pe_value(symbol, cd)
         if symbol in _FIN_SECTOR:
-            return self._bank_rim_value(symbol, data)
-        return self._dcf_value(symbol, data)
+            return self._bank_rim_value(symbol, cd)
+        return self._dcf_value(symbol, cd)
 
     # ── FCF-DCF for non-financial companies ───────────────────────────────────
 
-    def _dcf_value(self, symbol: str, data: dict) -> DCFResult:
-        pl   = data.get("profit_loss", {})
-        bs   = data.get("balance_sheet", {})
-        cf   = data.get("cash_flow", {})
-        cmp  = data.get("current_price") or _fetch_cmp(symbol)
+    def _dcf_value(self, symbol: str, cd: CompanyData) -> DCFResult:
+        cmp  = cd.current_price or _fetch_cmp(symbol)
 
-        years   = pl.get("years", [])
-        pl_rows = pl.get("rows", {})
-        bs_rows = bs.get("rows", {})
-        cf_rows = cf.get("rows", {})
-
-        n   = len(years)
-        cut = n - 1 if years and "TTM" in str(years[-1]) else n
-
-        def _s(rows: dict, key: str) -> list[float]:
-            return [v for v in rows.get(key, [])[:cut] if v is not None]
-
-        fcf_series = _s(cf_rows, "Free Cash Flow")
-        cfo_series = _s(cf_rows, "Cash from Operating Activity")
-        np_series  = _s(pl_rows, "Net Profit")
-        eps_series = _s(pl_rows, "EPS in Rs")
-        sales_ser  = _s(pl_rows, "Sales")
-        interest   = _s(pl_rows, "Interest")
-        tax_series = _s(pl_rows, "Tax %")
-        # Fix: banks use "Borrowing" singular; non-banks use "Borrowings"
-        borr_ser   = _s(bs_rows, "Borrowings") or _s(bs_rows, "Borrowing")
-        eq_cap     = _s(bs_rows, "Equity Capital")
-        reserves   = _s(bs_rows, "Reserves")
+        fcf_series = cd.series("cash_flow", "Free Cash Flow")
+        cfo_series = cd.series("cash_flow", "Cash from Operating Activity")
+        np_series  = cd.series("profit_loss", "Net Profit")
+        eps_series = cd.series("profit_loss", "EPS in Rs")
+        interest   = cd.series("profit_loss", "Interest")
+        tax_series = cd.series("profit_loss", "Tax %")
+        # Banks use "Borrowing" singular; non-banks use "Borrowings"
+        borr_ser   = cd.series("balance_sheet", "Borrowings", "Borrowing")
+        eq_cap     = cd.series("balance_sheet", "Equity Capital")
+        reserves   = cd.series("balance_sheet", "Reserves")
 
         notes: list[str] = []
 
@@ -383,7 +373,7 @@ class DCFEngine:
 
     # ── P/E relative model for listed life insurers ───────────────────────────
 
-    def _insurance_pe_value(self, symbol: str, data: dict) -> DCFResult:
+    def _insurance_pe_value(self, symbol: str, cd: CompanyData) -> DCFResult:
         """
         IV = 3Y-avg EPS × sector P/E anchor (62x for Indian life insurers).
 
@@ -391,20 +381,10 @@ class DCFEngine:
         that are not free cash to equity — DCF overstates IV by 150%+.
         P/E vs sector peers gives a grounded relative valuation.
         """
-        pl   = data.get("profit_loss", {})
-        cmp  = data.get("current_price") or _fetch_cmp(symbol)
+        cmp  = cd.current_price or _fetch_cmp(symbol)
 
-        years   = pl.get("years", [])
-        pl_rows = pl.get("rows", {})
-
-        n   = len(years)
-        cut = n - 1 if years and "TTM" in str(years[-1]) else n
-
-        def _s(rows: dict, key: str) -> list[float]:
-            return [v for v in rows.get(key, [])[:cut] if v is not None]
-
-        np_series  = _s(pl_rows, "Net Profit")
-        eps_series = _s(pl_rows, "EPS in Rs")
+        np_series  = cd.series("profit_loss", "Net Profit")
+        eps_series = cd.series("profit_loss", "EPS in Rs")
         notes: list[str] = []
 
         shares_cr = self._shares(np_series, eps_series)
@@ -450,7 +430,7 @@ class DCFEngine:
 
     # ── Residual Income Model for banks & NBFCs ───────────────────────────────
 
-    def _bank_rim_value(self, symbol: str, data: dict) -> DCFResult:
+    def _bank_rim_value(self, symbol: str, cd: CompanyData) -> DCFResult:
         """
         IV = BV₀ + Σ [(ROE_t − CoE) × BV_{t-1}] / (1+CoE)^t  +  TV / (1+CoE)^10
 
@@ -458,28 +438,14 @@ class DCFEngine:
         BV grows each year by retained earnings: BV_t = BV_{t-1} × (1 + ROE_t × retention).
         Monte Carlo: draws on ROE₀ and CoE to produce P10/P90 bands.
         """
-        pl   = data.get("profit_loss", {})
-        bs   = data.get("balance_sheet", {})
-        rat  = data.get("ratios", {})
-        cmp  = data.get("current_price") or _fetch_cmp(symbol)
+        cmp  = cd.current_price or _fetch_cmp(symbol)
 
-        years   = pl.get("years", [])
-        pl_rows = pl.get("rows", {})
-        bs_rows = bs.get("rows", {})
-        rat_rows = rat.get("rows", {})
-
-        n   = len(years)
-        cut = n - 1 if years and "TTM" in str(years[-1]) else n
-
-        def _s(rows: dict, key: str) -> list[float]:
-            return [v for v in rows.get(key, [])[:cut] if v is not None]
-
-        np_series  = _s(pl_rows, "Net Profit")
-        eps_series = _s(pl_rows, "EPS in Rs")
-        eq_cap     = _s(bs_rows, "Equity Capital")
-        reserves   = _s(bs_rows, "Reserves")
-        roe_series = _s(rat_rows, "ROE %")
-        div_payout = _s(pl_rows, "Dividend Payout %")
+        np_series  = cd.series("profit_loss", "Net Profit")
+        eps_series = cd.series("profit_loss", "EPS in Rs")
+        eq_cap     = cd.series("balance_sheet", "Equity Capital")
+        reserves   = cd.series("balance_sheet", "Reserves")
+        roe_series = cd.series("ratios", "ROE %")
+        div_payout = cd.series("profit_loss", "Dividend Payout %")
 
         notes: list[str] = []
 
@@ -643,13 +609,6 @@ class DCFEngine:
         tail = series[-n:] if len(series) >= n else series
         vals = [v for v in tail if v is not None]
         return sum(vals) / len(vals) if vals else 0.0
-
-    def _load(self, symbol: str) -> Optional[dict]:
-        path = self.cache_dir / f"{symbol}.json"
-        if not path.exists():
-            return None
-        with open(path) as f:
-            return json.load(f)
 
     def _empty(self, symbol: str, reason: str) -> DCFResult:
         return DCFResult(

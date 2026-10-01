@@ -169,8 +169,17 @@ def cmd_cache(args):
     from src.utils.cache_manager import print_cache_table, refresh_stale
     from config.nifty50_tickers import NIFTY50_TICKERS
 
+    from src.data.snapshots import backfill_from_cache, get_snapshot_store
+
     symbols = list(NIFTY50_TICKERS.keys())
     print_cache_table(symbols)
+
+    # Any cached file not yet in the history (e.g. fetched before snapshots
+    # existed) is recorded now, before a refresh can overwrite it.
+    added = backfill_from_cache()
+    if added:
+        print(f"  Snapshot history: recorded {added} existing file(s) "
+              f"({get_snapshot_store().count()} snapshots total)\n")
 
     if args.refresh or args.force:
         refresh_stale(symbols, force=args.force)

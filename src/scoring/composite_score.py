@@ -8,18 +8,16 @@ All scores are percentile-ranked within the universe (0 = worst, 100 = best).
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
+from src.data.company import LENDERS, CompanyData, load_company
+
 # Symbols that need bank-specific quality metrics
-_BANK_SYMS: set[str] = {
-    "HDFCBANK", "ICICIBANK", "AXISBANK", "KOTAKBANK", "SBIN", "INDUSINDBK",
-    "BAJFINANCE", "SHRIRAMFIN", "BAJAJFINSV",
-}
+_BANK_SYMS = LENDERS
 
 
 @dataclass
@@ -59,57 +57,35 @@ class CompositeScorer:
     # ── Per-company raw metric extraction ─────────────────────────────────────
 
     def _extract(self, symbol: str) -> Optional[dict]:
-        path = self.cache_dir / f"{symbol}.json"
-        if not path.exists():
+        cd = load_company(symbol, cache_dir=self.cache_dir)
+        if cd is None:
             return None
-        with open(path) as f:
-            data = json.load(f)
 
-        pl      = data.get("profit_loss", {})
-        bs      = data.get("balance_sheet", {})
-        cf      = data.get("cash_flow", {})
-        rat     = data.get("ratios", {})
-
-        years    = pl.get("years", [])
-        pl_rows  = pl.get("rows", {})
-        bs_rows  = bs.get("rows", {})
-        cf_rows  = cf.get("rows", {})
-        rat_rows = rat.get("rows", {})
-
-        n   = len(years)
-        cut = n - 1 if years and "TTM" in str(years[-1]) else n
-
-        def _s(rows, key):
-            return [v for v in rows.get(key, [])[:cut] if v is not None]
-
-        is_bank = symbol in _BANK_SYMS
-
-        np_ser  = _s(pl_rows, "Net Profit")
-        eps_ser = _s(pl_rows, "EPS in Rs")
-        int_ser = _s(pl_rows, "Interest")
-        dep_ser = _s(pl_rows, "Depreciation")
-        pbt_ser = _s(pl_rows, "Profit before tax")
-        cfo_ser = _s(cf_rows, "Cash from Operating Activity")
-        fcf_ser = _s(cf_rows, "Free Cash Flow")
-        # Balance sheet — fix: banks store "Borrowing" (singular)
-        borr_ser   = _s(bs_rows, "Borrowings") or _s(bs_rows, "Borrowing")
-        eq_cap     = _s(bs_rows, "Equity Capital")
-        reserves   = _s(bs_rows, "Reserves")
-        tot_assets = _s(bs_rows, "Total Assets")
+        np_ser  = cd.series("profit_loss", "Net Profit")
+        eps_ser = cd.series("profit_loss", "EPS in Rs")
+        int_ser = cd.series("profit_loss", "Interest")
+        dep_ser = cd.series("profit_loss", "Depreciation")
+        pbt_ser = cd.series("profit_loss", "Profit before tax")
+        cfo_ser = cd.series("cash_flow", "Cash from Operating Activity")
+        fcf_ser = cd.series("cash_flow", "Free Cash Flow")
+        # Balance sheet — banks store "Borrowing" (singular)
+        borr_ser   = cd.series("balance_sheet", "Borrowings", "Borrowing")
+        eq_cap     = cd.series("balance_sheet", "Equity Capital")
+        reserves   = cd.series("balance_sheet", "Reserves")
+        tot_assets = cd.series("balance_sheet", "Total Assets")
         eq_book    = (eq_cap[-1] + reserves[-1]) if eq_cap and reserves else 1
         de_ratio   = borr_ser[-1] / eq_book if borr_ser and eq_book > 0 else 0.0
 
-        if is_bank:
+        if cd.is_lender:
             return self._extract_bank(
-                symbol, pl_rows, bs_rows, rat_rows, cf_rows,
-                np_ser, eps_ser, int_ser, cfo_ser, fcf_ser,
-                borr_ser, eq_cap, reserves, tot_assets, de_ratio, cut,
+                cd, np_ser, eps_ser, int_ser, cfo_ser, fcf_ser,
+                borr_ser, eq_cap, reserves, tot_assets, de_ratio,
             )
 
         # ── Non-financial extraction ──────────────────────────────────────────
-        sales_ser = _s(pl_rows, "Sales")
-        opm_ser   = _s(pl_rows, "OPM %")
-        roce_ser  = _s(rat_rows, "ROCE %")
+        sales_ser = cd.series("profit_loss", "Sales")
+        opm_ser   = cd.series("profit_loss", "OPM %")
+        roce_ser  = cd.series("ratios", "ROCE %")
 
         roce_3y = self._tail_avg(roce_ser, 3)
         opm_3y  = self._tail_avg(opm_ser, 3)
@@ -151,19 +127,13 @@ class CompositeScorer:
         }
 
     def _extract_bank(
-        self, symbol: str,
-        pl_rows, bs_rows, rat_rows, cf_rows,
+        self, cd: CompanyData,
         np_ser, eps_ser, int_ser, cfo_ser, fcf_ser,
-        borr_ser, eq_cap, reserves, tot_assets, de_ratio, cut,
+        borr_ser, eq_cap, reserves, tot_assets, de_ratio,
     ) -> dict:
         """Bank-specific metrics: ROE → roce_3y, NIM → opm_3y, ROA → int_cov."""
-
-        def _s(rows, key):
-            return [v for v in rows.get(key, [])[:cut] if v is not None]
-
-        roe_ser = _s(rat_rows, "ROE %")
-        rev_ser = _s(pl_rows, "Revenue")    # banks: total interest income
-        div_ser = _s(pl_rows, "Dividend Payout %")
+        roe_ser = cd.series("ratios", "ROE %")
+        rev_ser = cd.series("profit_loss", "Revenue")    # banks: total interest income
 
         # ROE quality metric (3Y avg)
         roe_3y = self._tail_avg(roe_ser, 3)
