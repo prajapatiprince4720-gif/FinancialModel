@@ -624,21 +624,18 @@ class DCFEngine:
         return (end / start) ** (1 / n) - 1
 
     def _shares(self, np_series: list[float], eps_series: list[float]) -> float:
+        """
+        Current share count (Cr) implied by the latest year's NP / EPS.
+
+        Only the latest year is used, so pre-IPO share counts (ZOMATO) never
+        enter. A former "pre-IPO guard" here trimmed earlier years on any >20x EPS
+        jump — which an ordinary loss year also triggers (BHARTIARTL 0.74 → −55) —
+        and, because it shortened the list it was iterating, raised IndexError.
+        """
         if not np_series or not eps_series:
             return 0.0
-
-        # Pre-IPO guard: detect massive EPS discontinuity (e.g. ZOMATO went from
-        # −₹70,000 EPS → −₹10 after IPO when share count multiplied ~10,000×).
-        # Only compute share count from post-discontinuity values.
-        clean_np, clean_eps = list(np_series), list(eps_series)
-        for i in range(len(clean_eps) - 1):
-            a, b = clean_eps[i], clean_eps[i + 1]
-            if a and b and abs(a) > 0 and abs(b / a) > 20:
-                clean_np  = np_series[i + 1:]
-                clean_eps = eps_series[i + 1:]
-
-        np_cr, eps_rs = clean_np[-1], clean_eps[-1]
-        if not eps_rs or eps_rs == 0:
+        np_cr, eps_rs = np_series[-1], eps_series[-1]
+        if not eps_rs:
             return 0.0
         return np_cr / eps_rs
 

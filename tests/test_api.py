@@ -180,3 +180,19 @@ class TestAPI:
 
     def test_export_rejects_bad_format(self, client):
         assert client.get("/api/export/HDFCBANK?fmt=xlsx").status_code == 422
+
+
+class TestShareCount:
+
+    def test_loss_year_does_not_crash(self):
+        """BHARTIARTL-shaped EPS (0.74 → −55) used to raise IndexError."""
+        from src.valuation.dcf_engine import DCFEngine
+        e = DCFEngine(rf_context=FIXED_RF, quiet=True)
+        np_ser  = [1688.0, -30664.0, -12364.0, 8305.0, 37481.0]
+        eps_ser = [0.74, -55.06, -25.63, 7.23, 58.85]
+        assert e._shares(np_ser, eps_ser) == pytest.approx(37481.0 / 58.85)
+
+    def test_zero_eps_returns_zero(self):
+        from src.valuation.dcf_engine import DCFEngine
+        e = DCFEngine(rf_context=FIXED_RF, quiet=True)
+        assert e._shares([100.0], [0.0]) == 0.0
