@@ -195,6 +195,21 @@ def report(symbol: str) -> dict[str, Any]:
         )
 
 
+@app.get("/api/facts/{symbol}")
+def facts(symbol: str) -> dict[str, Any]:
+    """
+    Every computed fact about one company: metric histories with growth rates,
+    trend slopes and z-scores, market multiples, valuation, score, peer
+    percentiles and data-quality caveats. No LLM involved.
+    """
+    from src.services.research_service import jsonable
+
+    sheet = get_service().fact_sheet(symbol)
+    if sheet is None:
+        raise HTTPException(status_code=404, detail=f"'{symbol}' is not covered.")
+    return jsonable(sheet.to_dict())
+
+
 @app.get("/api/faq/{symbol}")
 def faq(symbol: str, limit: int = Query(default=200, ge=1, le=400)) -> dict[str, Any]:
     """
@@ -263,15 +278,18 @@ def ask(payload: AskRequest, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"'{payload.symbol}' is not covered.")
 
     try:
-        answer = InvestorQAAgent().ask(payload.question, ticker=ticker)
+        result = InvestorQAAgent().ask_detailed(payload.question, ticker=ticker)
     except Exception as exc:
         logger.error(f"/api/ask failed: {exc}")
         raise HTTPException(status_code=502, detail=f"The language model call failed: {exc}")
 
     return {
         "question":   payload.question,
-        "symbol":     symbol or None,
-        "answer":     answer,
+        "symbol":     result.get("symbol") or symbol or None,
+        "answer":     result["answer"],
+        # "facts" = computed from the fact sheet, no model call; "llm" = model
+        # reasoning over the fact sheet; "concept" = canned explanation.
+        "source":     result.get("source", "llm"),
         "disclaimer": SEBI_DISCLAIMER_SHORT,
     }
 

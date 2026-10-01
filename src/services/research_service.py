@@ -73,6 +73,8 @@ class ResearchService:
         self._score_cache: dict[str, Any] = {}
         self._score_fingerprint: Optional[str] = None
         self._rf_context = None
+        self._facts: dict[str, Any] = {}
+        self._facts_fp: Optional[str] = None
 
     # ── Universe ──────────────────────────────────────────────────────────────
 
@@ -173,6 +175,63 @@ class ResearchService:
             }
             for r in ranked
         ])
+
+    # ── Fact sheets ───────────────────────────────────────────────────────────
+
+    def _fact_fingerprint(self) -> str:
+        """Screener cache state plus the live-price cache, which moves intraday."""
+        from src.valuation.dcf_engine import _PRICE_CACHE_FILE
+        try:
+            price_m = f"{_PRICE_CACHE_FILE.stat().st_mtime:.0f}"
+        except OSError:
+            price_m = "0"
+        return f"{self._fingerprint()}|{price_m}"
+
+    def fact_sheets(self) -> dict[str, Any]:
+        """
+        Fact sheets for the whole universe (peer ranks need everyone), cached
+        until the fundamentals or the price cache change. Valuations are not
+        included here — they are per-company and attached by fact_sheet().
+        """
+        from src.facts import build_fact_sheets
+        from src.valuation.dcf_engine import _fetch_cmp
+
+        fp = self._fact_fingerprint()
+        with self._lock:
+            if self._facts_fp == fp and self._facts:
+                return self._facts
+
+        syms   = list(NIFTY50_TICKERS)
+        sheets = build_fact_sheets(
+            symbols=syms,
+            prices={s: _fetch_cmp(s) for s in syms},
+            scores=self.scores(),
+            freshness=freshness_report(syms),
+        )
+        with self._lock:
+            self._facts, self._facts_fp = sheets, self._fact_fingerprint()
+        return sheets
+
+    def fact_sheet(self, symbol: str, with_valuation: bool = True):
+        """One company's fact sheet, with its valuation attached on request."""
+        import copy
+
+        sym   = normalise_symbol(symbol)
+        sheet = self.fact_sheets().get(sym)
+        if sheet is None:
+            return None
+        sheet = copy.deepcopy(sheet)
+        if with_valuation:
+            v = self.valuation(sym)
+            if v.intrinsic_value > 0:
+                sheet.valuation = {
+                    "model": v.model, "intrinsic_value": v.intrinsic_value,
+                    "iv_low": v.iv_low, "iv_high": v.iv_high,
+                    "margin_of_safety": v.margin_of_safety,
+                    "discount_rate": v.wacc, "verdict": v.verdict,
+                    "notes": list(v.notes or []),
+                }
+        return sheet
 
     # ── Freshness ─────────────────────────────────────────────────────────────
 

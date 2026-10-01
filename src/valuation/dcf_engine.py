@@ -25,7 +25,10 @@ _PRICE_CACHE_FILE = Path("data/raw/nse/live_prices.json")
 # Some NSE symbols need alternate yfinance tickers
 _TICKER_OVERRIDES: dict[str, list[str]] = {
     "ZOMATO":     ["ETERNAL.NS"],
-    "TATAMOTORS": ["TATAMOTORS.BO", "TTM"],   # BSE fallback; ADR as last resort
+    # TATAMOTORS deliberately has no fallback: after the 2025 demerger the
+    # traded TMPV price covers passenger vehicles only, while Screener still
+    # reports the combined company — pairing them gave a 1.3x P/E. No price is
+    # better than a wrong one. See CORPORATE_ACTIONS in src/data/company.py.
 }
 
 

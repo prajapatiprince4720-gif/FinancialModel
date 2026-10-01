@@ -143,14 +143,14 @@ class TestAPI:
 
     def test_ask_unknown_symbol_is_404(self, client, monkeypatch):
         monkeypatch.setattr("src.agents.investor_qa_agent.InvestorQAAgent",
-                            lambda: SimpleNamespace(ask=lambda q, ticker="": "x"))
+                            lambda: SimpleNamespace(ask_detailed=lambda q, ticker="": {"answer": "x", "source": "llm"}))
         r = client.post("/api/ask", json={"question": "Is it cheap?", "symbol": "NOTASTOCK"})
         assert r.status_code == 404
 
     def test_ask_rate_limited(self, client, monkeypatch):
         monkeypatch.setattr(api_main, "_LLM_RATE_LIMIT", 2)
         monkeypatch.setattr("src.agents.investor_qa_agent.InvestorQAAgent",
-                            lambda: SimpleNamespace(ask=lambda q, ticker="": "stub answer"))
+                            lambda: SimpleNamespace(ask_detailed=lambda q, ticker="": {"answer": "stub answer", "source": "llm"}))
         payload = {"question": "What is the moat?", "symbol": "TCS"}
         first = client.post("/api/ask", json=payload)
         assert first.status_code == 200
@@ -164,7 +164,7 @@ class TestAPI:
         def boom(q, ticker=""):
             raise RuntimeError("quota exhausted")
         monkeypatch.setattr("src.agents.investor_qa_agent.InvestorQAAgent",
-                            lambda: SimpleNamespace(ask=boom))
+                            lambda: SimpleNamespace(ask_detailed=boom))
         r = client.post("/api/ask", json={"question": "What is the moat?"})
         assert r.status_code == 502
 

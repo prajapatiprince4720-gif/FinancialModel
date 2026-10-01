@@ -38,6 +38,18 @@ INSURERS: frozenset[str] = frozenset({"HDFCLIFE", "SBILIFE"})
 
 STATEMENTS = ("profit_loss", "balance_sheet", "cash_flow", "ratios")
 
+# Corporate actions that break the link between historical fundamentals and the
+# traded security. Surfaced as caveats wherever the company is reported on.
+CORPORATE_ACTIONS: dict[str, str] = {
+    "TATAMOTORS": (
+        "Tata Motors demerged in 2025 into Tata Motors Passenger Vehicles (TMPV) and "
+        "Tata Motors Commercial Vehicles (TMCV). Fundamentals here describe the combined "
+        "pre-demerger company and do not match either listed stock; price-based figures "
+        "are withheld."
+    ),
+    "ZOMATO": "Zomato Ltd was renamed Eternal Ltd (NSE: ETERNAL) in 2025.",
+}
+
 _MONTH_YEAR = re.compile(r"^([A-Za-z]{3})\s+(\d{4})$")
 
 

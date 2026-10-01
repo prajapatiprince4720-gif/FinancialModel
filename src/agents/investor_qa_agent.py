@@ -51,33 +51,64 @@ class InvestorQAAgent:
             ticker:   Optional yfinance ticker (e.g. 'RELIANCE.NS') for stock-specific questions.
                       If not provided, the agent tries to detect the stock from the question.
         """
-        # Check FAQ cache first for instant answers
+        return self.ask_detailed(question, ticker)["answer"]
+
+    def ask_detailed(self, question: str, ticker: str = "") -> dict[str, Any]:
+        """
+        Answer a question and report how the answer was produced.
+
+        Order of preference, cheapest and most reliable first:
+          1. "concept"  — canned explanation of a general concept
+          2. "facts"    — a lookup answered from the company's fact sheet, no LLM
+          3. "llm"      — LLM reasoning, with the fact sheet as its primary context
+        """
         faq_answer = self._check_faq(question)
         if faq_answer:
-            return faq_answer
+            return {"answer": faq_answer, "source": "concept", "symbol": None}
 
-        # Detect ticker from question if not provided
         if not ticker:
             ticker = self._detect_ticker(question)
+        symbol = ticker.replace(".NS", "").replace(".BO", "") if ticker else ""
 
-        # Fetch relevant context if a stock was mentioned
+        sheet = None
+        if symbol:
+            try:
+                from src.services.research_service import get_service
+                sheet = get_service().fact_sheet(symbol)
+            except Exception as exc:
+                logger.warning(f"[InvestorQA] fact sheet unavailable for {symbol}: {exc}")
+
+        if sheet is not None:
+            from src.facts.answerer import answer_from_facts
+            direct = answer_from_facts(question, sheet)
+            if direct is not None:
+                logger.info(f"[InvestorQA] answered from fact sheet ({direct.metric})")
+                return {"answer": direct.text, "source": "facts", "symbol": symbol}
+
         context = ""
+        if sheet is not None:
+            context = sheet.to_context()
         if ticker:
+            # Raw statement chunks and news supplement the fact sheet. The old
+            # LLM-pre-written "faq" section is deliberately not retrieved: those
+            # answers go stale on every data refresh and could carry invented
+            # numbers back in as if they were facts.
             results = self.retriever.retrieve_multi_section(
                 query=question,
                 ticker=ticker,
                 sections=[
-                    "faq",                          # pre-trained Q&A pairs (highest relevance)
-                    "company_profile", "key_ratios", "income_statement",
-                    "screener_profit_loss", "screener_ratios", "screener_peers",
-                    "screener_balance_sheet",
+                    "company_profile", "news",
+                    "screener_profit_loss", "screener_balance_sheet",
+                    "screener_cash_flow", "screener_ratios",
                 ],
-                top_k_per_section=3,
+                top_k_per_section=2,
             )
-            context = self.retriever.format_context(results)
+            if results:
+                context += "\n\nSUPPORTING DOCUMENTS (lower priority than the fact sheet):\n"
+                context += self.retriever.format_context(results)
             logger.info(f"[InvestorQA] Retrieved {len(results)} chunks for {ticker}")
         else:
-            logger.info(f"[InvestorQA] Concept question — no stock retrieval")
+            logger.info("[InvestorQA] Concept question — no stock retrieval")
 
         user_message = build_investor_qa_query(question, context=context, ticker=ticker)
         response = self.llm.complete(
@@ -85,7 +116,7 @@ class InvestorQAAgent:
             user_message=user_message,
             temperature=0.3,
         )
-        return response
+        return {"answer": response, "source": "llm", "symbol": symbol or None}
 
     def _check_faq(self, question: str) -> str:
         """Return a canned FAQ answer if the question is a close match."""
