@@ -49,6 +49,20 @@ def _print_factor_table(result: BacktestResult, s: dict) -> None:
     print("  Weights are the pillar's share of the composite. Each factor is oriented the way the")
     print("  score uses it, so a positive IC means it helped; earnings yield is not in the score.")
 
+    def cell(key, name):
+        m, t, pos, n = s[key].get(name, (None, None, 0, 0))
+        return f"{_num(m)} ({_num(t)}) {pos}/{n}"
+
+    print()
+    print("\033[1m  SECTOR SPLIT — mean IC (t-stat) and periods positive\033[0m")
+    print("  " + "─" * 96)
+    print(f"  {'Factor':<24}{'All stocks':>24}{'Between sectors':>24}{'Within sectors':>24}")
+    for name, label in (("composite", "Composite"), *_FACTOR_LABELS.items()):
+        print(f"  {label:<24}{cell('factor_ic', name):>24}"
+              f"{cell('factor_ic_between', name):>24}{cell('factor_ic_within', name):>24}")
+    print("  Between: did sectors with a high average signal outperform? (~14 sectors per period)")
+    print("  Within:  did the higher-signal company beat its own sector? (one-company sectors drop out)")
+
 
 def print_backtest(result: BacktestResult) -> None:
     print()

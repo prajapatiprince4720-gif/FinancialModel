@@ -66,6 +66,20 @@ class TestPeriodStats:
         assert p.factor_ic["quality"] == pytest.approx(1.0)
         assert p.factor_ic["growth"] == pytest.approx(-1.0)
 
+    def test_sector_split_separates_sector_bet_from_stock_picking(self):
+        # Sector A beats sector B by a lot and has the higher signal (a sector bet that
+        # paid), but within each sector the higher-signal stock does worse.
+        rows = [("A1", 90.0, 0.30), ("A2", 80.0, 0.40), ("A3", 70.0, 0.50),
+                ("B1", 30.0, 0.00), ("B2", 20.0, 0.10), ("B3", 10.0, 0.20),
+                ("C1", 50.0, 0.15), ("C2", 45.0, 0.16),
+                ("D1", 60.0, 0.25), ("E1", 40.0, 0.12)]
+        obs = [Observation(date(2020, 6, 1), s, 100.0, x, None, None, r,
+                           factors={"roce": x}, sector=s[0]) for s, x, r in rows]
+        p = _period_stats(date(2020, 6, 1), obs, benchmark=None)
+        assert p.factor_ic_between["roce"] == pytest.approx(1.0)
+        assert p.factor_ic_within["roce"] < 0
+        assert p.factor_ic["composite"] == pytest.approx(p.score_ic)
+
     def test_no_undervalued_names(self):
         rows = [(f"S{i}", float(i), 0.2, i / 100) for i in range(6)]
         p = _period_stats(date(2020, 6, 1), self._obs(rows), benchmark=None)

@@ -14,7 +14,9 @@ What is measured, per date:
                     of them that beat the equal-weight universe (hit rate)
   DCF IC            Spearman correlation of P(undervalued) vs forward return
   factor IC         the same for each pillar and sub-factor of the composite,
-                    plus earnings yield as a cheapness reference
+                    plus earnings yield as a cheapness reference, also split into
+                    between sectors (did high-signal sectors win?) and within
+                    sectors (did the high-signal company beat its sector?)
 """
 from __future__ import annotations
 
@@ -27,6 +29,7 @@ import pandas as pd
 
 from src.backtest.prices import BENCHMARK, PriceHistory
 from src.data.company import CompanyData, load_company
+from src.data.sectors import sector_of
 from src.scoring.composite_score import CompositeScorer, ScoreResult
 from src.utils.macro_rates import RFContext
 from src.valuation.dcf_engine import DCFEngine
@@ -69,6 +72,7 @@ SCORE_FACTORS: dict[str, Callable[[ScoreResult], float]] = {
 # Not part of the score: a cheapness reference, to test whether the score's
 # misses are explained by paying up for quality.
 REFERENCE_FACTORS = ("earnings_yield",)
+SIGNALS = ("composite", *SCORE_FACTORS, *REFERENCE_FACTORS)
 
 
 @dataclass
@@ -81,6 +85,7 @@ class Observation:
     margin_of_safety: Optional[float]
     fwd_return:       float
     factors:          dict[str, float] = field(default_factory=dict)
+    sector:           str = "DEFAULT"
 
 
 @dataclass
@@ -95,7 +100,11 @@ class PeriodStats:
     undervalued_hits:    int              # undervalued names that beat the universe
     undervalued_return:  Optional[float]
     dcf_ic:              Optional[float]
+    # Per signal ("composite" and each factor): IC across all stocks, across
+    # sector averages, and within sectors (see _between_sector_ic / _within_sector_ic).
     factor_ic:           dict[str, Optional[float]] = field(default_factory=dict)
+    factor_ic_between:   dict[str, Optional[float]] = field(default_factory=dict)
+    factor_ic_within:    dict[str, Optional[float]] = field(default_factory=dict)
 
     @property
     def undervalued_hit_rate(self) -> Optional[float]:
@@ -128,12 +137,13 @@ class BacktestResult:
         n_uv = sum(p.undervalued_n for p in ps)
         out["undervalued_hit_rate"] = (hits / n_uv, n_uv) if n_uv else (None, 0)
 
-        # name → (mean IC, t-stat, periods positive, periods measured)
-        out["factor_ic"] = {}
-        for name in (*SCORE_FACTORS, *REFERENCE_FACTORS):
-            vals = [p.factor_ic[name] for p in ps if p.factor_ic.get(name) is not None]
-            m, t = _mean_t(vals)
-            out["factor_ic"][name] = (m, t, sum(v > 0 for v in vals), len(vals))
+        # key → name → (mean IC, t-stat, periods positive, periods measured)
+        for key in ("factor_ic", "factor_ic_between", "factor_ic_within"):
+            out[key] = {}
+            for name in SIGNALS:
+                vals = [v for p in ps if (v := getattr(p, key).get(name)) is not None]
+                m, t = _mean_t(vals)
+                out[key][name] = (m, t, sum(v > 0 for v in vals), len(vals))
         return out
 
 
@@ -213,6 +223,7 @@ def run_backtest(dates: list[date], symbols: Optional[list[str]] = None,
                 margin_of_safety=r.margin_of_safety if ok else None,
                 fwd_return=returns[sym],
                 factors=_factors(scores[sym], view),
+                sector=sector_of(sym),
             ))
         observations.extend(period_obs)
         periods.append(_period_stats(when, period_obs,
@@ -234,7 +245,8 @@ def _factors(score: ScoreResult, view: CompanyData) -> dict[str, float]:
 def _period_stats(when: date, obs: list[Observation], benchmark: Optional[float]) -> PeriodStats:
     df = pd.DataFrame([{k: v for k, v in o.__dict__.items() if k != "factors"} for o in obs])
     universe = float(df["fwd_return"].mean())
-    factors  = pd.DataFrame([o.factors for o in obs], index=df.index)
+    signals  = pd.DataFrame([o.factors for o in obs], index=df.index).assign(composite=df["score"])
+    ret, sector = df["fwd_return"], df["sector"]
 
     k   = max(1, len(df) // 5)
     top = df.nlargest(k, "score")
@@ -250,9 +262,37 @@ def _period_stats(when: date, obs: list[Observation], benchmark: Optional[float]
         undervalued_hits=int((uv["fwd_return"] > universe).sum()),
         undervalued_return=float(uv["fwd_return"].mean()) if len(uv) else None,
         dcf_ic=_spearman(valued["prob_undervalued"], valued["fwd_return"]),
-        factor_ic={name: _spearman(col.dropna(), df.loc[col.dropna().index, "fwd_return"])
-                   for name, col in factors.items()},
+        factor_ic={name: _spearman(col.dropna(), ret[col.dropna().index])
+                   for name, col in signals.items()},
+        factor_ic_between={name: _between_sector_ic(col, ret, sector) for name, col in signals.items()},
+        factor_ic_within={name: _within_sector_ic(col, ret, sector) for name, col in signals.items()},
     )
+
+
+def _between_sector_ic(x: pd.Series, ret: pd.Series, sector: pd.Series) -> Optional[float]:
+    """
+    Did sectors that score high on the signal outperform? Rank IC across sectors
+    of the average percentile rank of the signal vs the equal-weight sector return.
+    """
+    d = pd.DataFrame({"x": x.rank(pct=True), "r": ret, "s": sector}).dropna()
+    g = d.groupby("s")[["x", "r"]].mean()
+    return _spearman(g["x"], g["r"])
+
+
+def _within_sector_ic(x: pd.Series, ret: pd.Series, sector: pd.Series) -> Optional[float]:
+    """
+    Did the higher-scoring company beat its own sector? The signal is ranked within
+    each sector and centred, the return is taken relative to the sector's mean, and
+    the two are rank-correlated. One-company sectors carry no such information.
+    """
+    d = pd.DataFrame({"x": x, "r": ret, "s": sector}).dropna()
+    d = d[d.groupby("s")["x"].transform("count") >= 2]
+    if d.empty:
+        return None
+    rank = d.groupby("s")["x"].rank(pct=True)
+    xw   = rank - rank.groupby(d["s"]).transform("mean")
+    rw   = d["r"] - d.groupby("s")["r"].transform("mean")
+    return _spearman(xw, rw)
 
 
 def _spearman(x: pd.Series, y: pd.Series) -> Optional[float]:
