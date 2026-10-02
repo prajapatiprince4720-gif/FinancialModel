@@ -6,6 +6,7 @@ google-genai>=1.0.0           # Gemini; replaces end-of-life google-generativeai
 # ── Charts & Documents ───────────────────────────────────────────────────────
 matplotlib>=3.9.0
 fpdf2>=2.7.0                   # professional PDF report generation
+pypdf>=6.0                     # text extraction from earnings-call transcripts
 python-docx>=1.1.0             # Word (.docx) report generation
 langchain>=0.2.0
 langchain-anthropic>=0.1.15
