@@ -50,7 +50,8 @@ CORPORATE_ACTIONS: dict[str, str] = {
     "ZOMATO": "Zomato Ltd was renamed Eternal Ltd (NSE: ETERNAL) in 2025.",
 }
 
-_MONTH_YEAR = re.compile(r"^([A-Za-z]{3})\s+(\d{4})$")
+# "Mar 2024", or "Mar 2016 15m" for a transition year after a change of fiscal year-end.
+_MONTH_YEAR = re.compile(r"^([A-Za-z]{3})\s+(\d{4})(?:\s+\d{1,2}m)?$")
 
 
 def _full_year_cut(years: list[Any]) -> int:

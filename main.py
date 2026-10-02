@@ -580,6 +580,17 @@ def cmd_status(args):
         print("  (empty — run: python main.py ingest --ticker RELIANCE.NS)")
 
 
+def cmd_backtest(args):
+    """Walk-forward backtest of the composite score and the DCF."""
+    from src.backtest import rebalance_dates, run_backtest
+    from src.backtest.report import print_backtest
+
+    dates = rebalance_dates(args.start, args.end)
+    print(f"\nBacktesting {dates[0]} → {dates[-1]} ({len(dates)} rebalance dates)...")
+    result = run_backtest(dates, horizon_days=args.horizon, refresh_prices=args.refresh_prices)
+    print_backtest(result)
+
+
 def cmd_macro(args):
     from src.utils.macro_rates import get_rf_rate, refresh_rates, set_rf_rate
     from src.valuation.dcf_engine import _ERP, _TERM_G
@@ -714,6 +725,14 @@ def main():
                          help="Manually set the 10Y GSEC yield in %% (e.g. --set 6.75). "
                               "Check https://www.nseindia.com/market-data/bonds-trading-information")
     p_macro.set_defaults(func=cmd_macro)
+
+    # ── backtest ──
+    p_bt = subparsers.add_parser("backtest", help="Walk-forward backtest of the composite score and DCF")
+    p_bt.add_argument("--start", type=int, default=2018, help="First rebalance year (default: 2018)")
+    p_bt.add_argument("--end", type=int, default=2025, help="Last rebalance year (default: 2025)")
+    p_bt.add_argument("--horizon", type=int, default=365, help="Forward return horizon in days (default: 365)")
+    p_bt.add_argument("--refresh-prices", action="store_true", help="Re-download price history from yfinance")
+    p_bt.set_defaults(func=cmd_backtest)
 
     args = parser.parse_args()
     args.func(args)

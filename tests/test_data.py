@@ -108,6 +108,7 @@ class TestReportingLag:
         ("Dec 2023", date(2024, 2, 29)),    # leap year
         ("Oct 2023", date(2023, 12, 31)),
         ("Nov 2023", date(2024, 1, 31)),
+        ("Mar 2016 15m", date(2016, 5, 31)),  # transition year after a fiscal year-end change
         ("TTM", None),
     ])
     def test_available_date(self, label, expected):
@@ -126,6 +127,12 @@ class TestAsOfView:
         assert view.series("profit_loss", "Net Profit") == [1, 2]
         assert view.series("balance_sheet", "Reserves") == [10, 20]
         assert view.ttm("profit_loss", "Net Profit") is None
+
+    def test_transition_year_does_not_truncate_later_years(self):
+        raw = _payload([1, 2, 3, 4])
+        raw["profit_loss"]["years"] = ["Dec 2021", "Mar 2023 15m", "Mar 2024", "TTM"]
+        view = CompanyData("X", raw).as_of(date(2024, 6, 1))
+        assert view.years("profit_loss") == ["Dec 2021", "Mar 2023 15m", "Mar 2024"]
 
     def test_before_first_release_is_empty(self):
         view = CompanyData("X", _payload([1, 2, 3, 4])).as_of(date(2020, 1, 1))
