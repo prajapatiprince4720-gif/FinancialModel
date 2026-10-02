@@ -444,13 +444,13 @@ def build_fact_sheets(
     All external inputs are injectable so this stays pure and testable; the
     research service supplies live prices, valuations and scores.
     """
-    from src.valuation.dcf_engine import _SYM_SECTOR
+    from src.data.sectors import SECTOR
 
     symbols    = symbols or list(NIFTY50_TICKERS)
     prices     = prices or {}
     valuations = valuations or {}
     scores     = scores or {}
-    sectors    = sectors or _SYM_SECTOR
+    sectors    = sectors or SECTOR
     freshness  = freshness or {}
 
     sheets: dict[str, FactSheet] = {}

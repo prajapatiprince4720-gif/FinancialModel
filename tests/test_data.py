@@ -115,6 +115,25 @@ class TestReportingLag:
         assert fiscal_year_available_date(label) == expected
 
 
+class TestSectors:
+
+    def test_every_constituent_classified(self):
+        from config.nifty50_tickers import NIFTY50_TICKERS
+        from src.data.sectors import LABELS, PSU, SECTOR
+        assert set(NIFTY50_TICKERS) <= set(SECTOR)
+        assert set(SECTOR.values()) <= set(LABELS)
+        assert PSU <= set(SECTOR)
+
+    def test_unknown_symbol_is_default(self):
+        from src.data.sectors import sector_label, sector_of
+        assert sector_of("NOPE") == "DEFAULT" and sector_label("NOPE") == "Other"
+
+    def test_sectors_without_a_beta_use_the_default_beta(self):
+        from src.valuation.dcf_engine import _SECTOR_BETA, _sector_beta
+        assert _sector_beta("APOLLOHOSP") == _SECTOR_BETA["DEFAULT"]
+        assert _sector_beta("TCS") == _SECTOR_BETA["IT"]
+
+
 class TestAsOfView:
 
     def test_year_appears_only_once_results_are_public(self):

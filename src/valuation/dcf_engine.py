@@ -17,6 +17,7 @@ from typing import Optional
 import numpy as np
 
 from src.data.company import BANKS, INSURERS, LENDERS, NBFCS, CompanyData, load_company
+from src.data.sectors import sector_of
 from src.utils.stats import log_linear_growth, robust_sd
 from src.valuation.probabilistic import ValueDriverInputs, simulate, verdict_from_probability
 
@@ -122,29 +123,12 @@ _SECTOR_BETA: dict[str, float] = {
     "FINSERV":   1.10,
     "CEMENT":    1.15,
     "DEFENSE":   0.90,   # PSU defense; steady order books, low cyclicality
-    "DEFAULT":   1.00,
+    "DEFAULT":   1.00,   # also any sector without its own beta (healthcare, consumer tech)
 }
 
-_SYM_SECTOR: dict[str, str] = {
-    "HDFCBANK": "BANKING", "ICICIBANK": "BANKING", "SBIN": "BANKING",
-    "AXISBANK": "BANKING", "KOTAKBANK": "BANKING", "INDUSINDBK": "BANKING",
-    "TCS": "IT", "INFY": "IT", "HCLTECH": "IT", "WIPRO": "IT", "TECHM": "IT",
-    "HINDUNILVR": "FMCG", "ITC": "FMCG", "NESTLEIND": "FMCG",
-    "BRITANNIA": "FMCG", "TATACONSUM": "FMCG",
-    "SUNPHARMA": "PHARMA", "DRREDDY": "PHARMA", "CIPLA": "PHARMA",
-    "MARUTI": "AUTO", "TATAMOTORS": "AUTO", "M&M": "AUTO",
-    "BAJAJ-AUTO": "AUTO", "EICHERMOT": "AUTO", "HEROMOTOCO": "AUTO",
-    "RELIANCE": "ENERGY", "ONGC": "ENERGY", "BPCL": "ENERGY", "NTPC": "ENERGY",
-    "POWERGRID": "ENERGY", "COALINDIA": "ENERGY",
-    "TATASTEEL": "METALS", "JSWSTEEL": "METALS", "HINDALCO": "METALS",
-    "LT": "INFRA", "ULTRACEMCO": "CEMENT", "GRASIM": "CEMENT",
-    "BHARTIARTL": "TELECOM",
-    "BAJFINANCE": "FINSERV", "BAJAJFINSV": "FINSERV", "SHRIRAMFIN": "FINSERV",
-    "HDFCLIFE": "INSURANCE", "SBILIFE": "INSURANCE",
-    "ADANIENT": "INFRA", "ADANIPORTS": "INFRA",
-    "TITAN": "FMCG", "ASIANPAINT": "FMCG", "BEL": "DEFENSE",
-    "APOLLOHOSP": "DEFAULT", "ZOMATO": "DEFAULT",
-}
+
+def _sector_beta(symbol: str) -> float:
+    return _SECTOR_BETA.get(sector_of(symbol), _SECTOR_BETA["DEFAULT"])
 
 # Symbols routed to Residual Income Model instead of FCF-DCF
 _BANK_SYMBOLS = BANKS
@@ -341,7 +325,7 @@ class DCFEngine:
         g0 = max(-0.05, min(g0, 0.25))
 
         # ── Discount rate: market-weight WACC ────────────────────────────────
-        beta        = _SECTOR_BETA.get(_SYM_SECTOR.get(symbol, "DEFAULT"), 1.0)
+        beta        = _sector_beta(symbol)
         debt_cr     = borrow[-1] if ok(borrow[-1]) else 0.0
         int_3y      = [i for i in interest[-3:] if ok(i)]
         borr_3y     = [b for b in borrow[-3:] if ok(b)]
@@ -497,7 +481,7 @@ class DCFEngine:
         roe0 = max(0.05, min(roe0, 0.35))
 
         # Cost of Equity
-        beta = _SECTOR_BETA.get(_SYM_SECTOR.get(symbol, "DEFAULT"), 1.0)
+        beta = _sector_beta(symbol)
         coe  = self._rf_rate + beta * _ERP
 
         # Retention ratio (1 - payout)

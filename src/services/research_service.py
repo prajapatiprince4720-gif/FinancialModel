@@ -27,7 +27,8 @@ from src.scoring.composite_score import CompositeScorer
 from src.utils.cache_manager import freshness_report
 from src.utils.logger import get_logger
 from src.utils.macro_rates import get_rf_context
-from src.valuation.dcf_engine import DCFEngine, _SYM_SECTOR
+from src.data.sectors import sector_of
+from src.valuation.dcf_engine import DCFEngine
 
 logger = get_logger(__name__)
 
@@ -85,7 +86,7 @@ class ResearchService:
             {
                 "symbol":  sym,
                 "name":    name,
-                "sector":  _SYM_SECTOR.get(sym, "DEFAULT"),
+                "sector":  sector_of(sym),
                 "ticker":  f"{sym}.NS",
             }
             for sym, name in sorted(NIFTY50_TICKERS.items(), key=lambda kv: kv[1])
@@ -162,7 +163,7 @@ class ResearchService:
             {
                 "symbol":    r.symbol,
                 "name":      NIFTY50_TICKERS.get(r.symbol, r.symbol),
-                "sector":    _SYM_SECTOR.get(r.symbol, "DEFAULT"),
+                "sector":    sector_of(r.symbol),
                 "composite": round(r.composite, 1),
                 "grade":     r.grade,
                 "quality":   round(r.quality, 1),
@@ -288,7 +289,7 @@ class ResearchService:
             "symbol":  sym,
             "name":    name,
             "ticker":  f"{sym}.NS",
-            "sector":  _SYM_SECTOR.get(sym, "DEFAULT"),
+            "sector":  sector_of(sym),
             "valuation": {
                 "model":            dcf.model,
                 "cmp":              dcf.cmp,

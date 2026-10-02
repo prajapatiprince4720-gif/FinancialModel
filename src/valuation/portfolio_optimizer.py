@@ -22,6 +22,7 @@ from typing import Optional
 import numpy as np
 
 
+from src.data.sectors import SECTOR
 from src.utils.macro_rates import RFContext, get_rf_context
 _N_PORT       = 10_000     # Monte Carlo portfolios (doubled for better coverage)
 _MIN_W        = 0.04       # min weight per stock (4%)
@@ -30,28 +31,9 @@ _MAX_SEC_W    = 0.40       # max sector weight (40%) — prevents sector bets
 _TRADING_DAYS = 252
 
 
-# ── Sector assignments (mirrors DCF engine) ───────────────────────────────────
+# ── Sector assignments (shared with the DCF engine) ───────────────────────────
 
-_SYM_SECTOR: dict[str, str] = {
-    "HDFCBANK": "BANKING",  "ICICIBANK": "BANKING",  "SBIN": "BANKING",
-    "AXISBANK": "BANKING",  "KOTAKBANK": "BANKING",  "INDUSINDBK": "BANKING",
-    "TCS": "IT",  "INFY": "IT",  "HCLTECH": "IT",  "WIPRO": "IT",  "TECHM": "IT",
-    "HINDUNILVR": "FMCG",  "ITC": "FMCG",  "NESTLEIND": "FMCG",
-    "BRITANNIA": "FMCG",   "TATACONSUM": "FMCG",
-    "TITAN": "FMCG",       "ASIANPAINT": "FMCG",
-    "SUNPHARMA": "PHARMA", "DRREDDY": "PHARMA",  "CIPLA": "PHARMA",
-    "MARUTI": "AUTO",  "TATAMOTORS": "AUTO",  "M&M": "AUTO",
-    "BAJAJ-AUTO": "AUTO",  "EICHERMOT": "AUTO",  "HEROMOTOCO": "AUTO",
-    "RELIANCE": "ENERGY",  "ONGC": "ENERGY",  "BPCL": "ENERGY",
-    "NTPC": "ENERGY",      "POWERGRID": "ENERGY",  "COALINDIA": "ENERGY",
-    "TATASTEEL": "METALS", "JSWSTEEL": "METALS",  "HINDALCO": "METALS",
-    "LT": "INFRA",  "ADANIENT": "INFRA",  "ADANIPORTS": "INFRA",  "BEL": "DEFENSE",
-    "ULTRACEMCO": "CEMENT",  "GRASIM": "CEMENT",
-    "BHARTIARTL": "TELECOM",
-    "BAJFINANCE": "FINSERV",  "BAJAJFINSV": "FINSERV",  "SHRIRAMFIN": "FINSERV",
-    "HDFCLIFE": "INSURANCE",  "SBILIFE": "INSURANCE",
-    "APOLLOHOSP": "HEALTHCARE",  "ZOMATO": "CONSUMER_TECH",
-}
+_SYM_SECTOR = SECTOR
 
 # Clusters of related sectors — within-cluster ρ raised to 0.45
 _SECTOR_CLUSTERS: list[set[str]] = [
@@ -308,8 +290,8 @@ class PortfolioOptimizer:
 
         # Volatility: sector-beta scaled, quality-adjusted.
         # Floor at 14%: no Nifty 50 stock has realised annual vol below that.
-        from src.valuation.dcf_engine import _SECTOR_BETA, _SYM_SECTOR as _SM
-        beta     = _SECTOR_BETA.get(_SM.get(symbol, "DEFAULT"), 1.0)
+        from src.valuation.dcf_engine import _sector_beta
+        beta     = _sector_beta(symbol)
         base_vol = 0.22 * beta                    # empirical Nifty 50 avg vol ~22%
         qual_adj = 1.0 - (score / 100) * 0.20    # quality reduces vol by up to 20%
         vol      = max(0.14, min(base_vol * qual_adj, 0.55))
