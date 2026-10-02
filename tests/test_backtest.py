@@ -57,6 +57,15 @@ class TestPeriodStats:
         assert (p.undervalued_n, p.undervalued_hits) == (2, 2)
         assert p.undervalued_hit_rate == 1.0
 
+    def test_factor_ic_per_factor(self):
+        obs = self._obs([(f"S{i}", float(i), 0.1, i / 100) for i in range(8)])
+        for i, o in enumerate(obs):
+            o.factors = {"quality": float(i), "growth": float(-i)}
+        obs[0].factors.pop("growth")          # a missing value is dropped, not zero-filled
+        p = _period_stats(date(2020, 6, 1), obs, benchmark=None)
+        assert p.factor_ic["quality"] == pytest.approx(1.0)
+        assert p.factor_ic["growth"] == pytest.approx(-1.0)
+
     def test_no_undervalued_names(self):
         rows = [(f"S{i}", float(i), 0.2, i / 100) for i in range(6)]
         p = _period_stats(date(2020, 6, 1), self._obs(rows), benchmark=None)
@@ -98,6 +107,8 @@ class TestRunBacktest:
             assert rf == historical_rf(date(2020, 6, 1)).rate
         by_sym = {o.symbol: o for o in result.observations}
         assert by_sym["TCS"].fwd_return > by_sym["INFY"].fwd_return
+        assert {"quality", "growth", "earnings_yield"} <= set(by_sym["TCS"].factors)
+        assert set(result.summary()["factor_ic"]) >= {"quality", "earnings_yield"}
 
     def test_horizon_past_last_price_is_skipped(self):
         result = run_backtest([date(2020, 6, 1), date(2021, 6, 1)], symbols=SYMS, prices=_prices(SYMS))

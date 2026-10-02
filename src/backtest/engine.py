@@ -13,19 +13,21 @@ What is measured, per date:
   undervalued       names with P(value > price) > 50%: mean return, and the share
                     of them that beat the equal-weight universe (hit rate)
   DCF IC            Spearman correlation of P(undervalued) vs forward return
+  factor IC         the same for each pillar and sub-factor of the composite,
+                    plus earnings yield as a cheapness reference
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from statistics import mean, stdev
-from typing import Optional
+from typing import Callable, Optional
 
 import pandas as pd
 
 from src.backtest.prices import BENCHMARK, PriceHistory
 from src.data.company import CompanyData, load_company
-from src.scoring.composite_score import CompositeScorer
+from src.scoring.composite_score import CompositeScorer, ScoreResult
 from src.utils.macro_rates import RFContext
 from src.valuation.dcf_engine import DCFEngine
 
@@ -50,6 +52,25 @@ CAVEATS = [
 ]
 
 
+# The composite's pillars and main sub-factors, each oriented so a higher value
+# is what the score rewards: a positive IC means the factor did its job.
+SCORE_FACTORS: dict[str, Callable[[ScoreResult], float]] = {
+    "quality":          lambda r: r.quality,
+    "growth":           lambda r: r.growth,
+    "earnings_quality": lambda r: r.earnings_quality,
+    "piotroski":        lambda r: r.piotroski_pct,
+    "roce":             lambda r: r.roce_pct,          # peer-ranked; banks → ROE
+    "margin":           lambda r: r.opm_pct,           # peer-ranked; banks → NIM
+    "low_debt":         lambda r: -r.de_ratio,
+    "revenue_growth":   lambda r: r.revenue_cagr_3y,
+    "eps_growth":       lambda r: r.eps_cagr_3y,
+    "fcf_growth":       lambda r: r.fcf_cagr_3y,
+}
+# Not part of the score: a cheapness reference, to test whether the score's
+# misses are explained by paying up for quality.
+REFERENCE_FACTORS = ("earnings_yield",)
+
+
 @dataclass
 class Observation:
     when:             date
@@ -59,6 +80,7 @@ class Observation:
     prob_undervalued: Optional[float]
     margin_of_safety: Optional[float]
     fwd_return:       float
+    factors:          dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -73,6 +95,7 @@ class PeriodStats:
     undervalued_hits:    int              # undervalued names that beat the universe
     undervalued_return:  Optional[float]
     dcf_ic:              Optional[float]
+    factor_ic:           dict[str, Optional[float]] = field(default_factory=dict)
 
     @property
     def undervalued_hit_rate(self) -> Optional[float]:
@@ -104,6 +127,13 @@ class BacktestResult:
         hits = sum(p.undervalued_hits for p in ps)
         n_uv = sum(p.undervalued_n for p in ps)
         out["undervalued_hit_rate"] = (hits / n_uv, n_uv) if n_uv else (None, 0)
+
+        # name → (mean IC, t-stat, periods positive, periods measured)
+        out["factor_ic"] = {}
+        for name in (*SCORE_FACTORS, *REFERENCE_FACTORS):
+            vals = [p.factor_ic[name] for p in ps if p.factor_ic.get(name) is not None]
+            m, t = _mean_t(vals)
+            out["factor_ic"][name] = (m, t, sum(v > 0 for v in vals), len(vals))
         return out
 
 
@@ -169,7 +199,7 @@ def run_backtest(dates: list[date], symbols: Optional[list[str]] = None,
             skipped.append(f"{when}: only {len(views)} companies with enough history")
             continue
 
-        scores = {r.symbol: r.composite for r in scorer.score_all(list(views), data=views)}
+        scores = {r.symbol: r for r in scorer.score_all(list(views), data=views)}
         engine = DCFEngine(cache_dir=cache_dir, rf_context=historical_rf(when), quiet=True)
         period_obs = []
         for sym, view in views.items():
@@ -178,10 +208,11 @@ def run_backtest(dates: list[date], symbols: Optional[list[str]] = None,
             r = engine.value(sym, data=view)
             ok = r.intrinsic_value > 0
             period_obs.append(Observation(
-                when=when, symbol=sym, price=view.current_price, score=scores[sym],
+                when=when, symbol=sym, price=view.current_price, score=scores[sym].composite,
                 prob_undervalued=r.prob_undervalued if ok else None,
                 margin_of_safety=r.margin_of_safety if ok else None,
                 fwd_return=returns[sym],
+                factors=_factors(scores[sym], view),
             ))
         observations.extend(period_obs)
         periods.append(_period_stats(when, period_obs,
@@ -190,11 +221,20 @@ def run_backtest(dates: list[date], symbols: Optional[list[str]] = None,
     return BacktestResult(horizon_days, observations, periods, skipped)
 
 
+def _factors(score: ScoreResult, view: CompanyData) -> dict[str, float]:
+    out = {name: float(f(score)) for name, f in SCORE_FACTORS.items()}
+    eps = view.series("profit_loss", "EPS in Rs")
+    if eps and view.current_price:
+        out["earnings_yield"] = eps[-1] / view.current_price
+    return out
+
+
 # ── Statistics ────────────────────────────────────────────────────────────────
 
 def _period_stats(when: date, obs: list[Observation], benchmark: Optional[float]) -> PeriodStats:
-    df = pd.DataFrame([o.__dict__ for o in obs])
+    df = pd.DataFrame([{k: v for k, v in o.__dict__.items() if k != "factors"} for o in obs])
     universe = float(df["fwd_return"].mean())
+    factors  = pd.DataFrame([o.factors for o in obs], index=df.index)
 
     k   = max(1, len(df) // 5)
     top = df.nlargest(k, "score")
@@ -210,6 +250,8 @@ def _period_stats(when: date, obs: list[Observation], benchmark: Optional[float]
         undervalued_hits=int((uv["fwd_return"] > universe).sum()),
         undervalued_return=float(uv["fwd_return"].mean()) if len(uv) else None,
         dcf_ic=_spearman(valued["prob_undervalued"], valued["fwd_return"]),
+        factor_ic={name: _spearman(col.dropna(), df.loc[col.dropna().index, "fwd_return"])
+                   for name, col in factors.items()},
     )
 
 

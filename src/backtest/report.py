@@ -16,6 +16,40 @@ def _num(x: Optional[float]) -> str:
     return "—" if x is None else f"{x:+.2f}"
 
 
+_FACTOR_LABELS = {
+    "quality":          "Quality (35%)",
+    "growth":           "Growth (30%)",
+    "earnings_quality": "Earnings quality (20%)",
+    "piotroski":        "Piotroski (15%)",
+    "roce":             "  ROCE / ROE",
+    "margin":           "  Op. margin / NIM",
+    "low_debt":         "  Low debt",
+    "revenue_growth":   "  Revenue CAGR 3y",
+    "eps_growth":       "  EPS CAGR 3y",
+    "fcf_growth":       "  FCF CAGR 3y",
+    "earnings_yield":   "Earnings yield (ref.)",
+}
+
+
+def _print_factor_table(result: BacktestResult, s: dict) -> None:
+    years = [p.when.year for p in result.periods]
+    print()
+    print("\033[1m  WHAT DRIVES THE COMPOSITE SCORE — rank IC per factor\033[0m")
+    print("  " + "─" * (24 + 7 * len(years) + 24))
+    print(f"  {'Factor':<24}" + "".join(f"{y:>7}" for y in years) + f"{'Mean':>8}{'t':>8}{'+ve':>8}")
+
+    m, t = s["score_ic"]
+    pos, n = s["score_ic_positive"]
+    print(f"  {'Composite':<24}" + "".join(f"{_num(p.score_ic):>7}" for p in result.periods)
+          + f"{_num(m):>8}{_num(t):>8}{f'{pos}/{n}':>8}")
+    for name, label in _FACTOR_LABELS.items():
+        m, t, pos, n = s["factor_ic"].get(name, (None, None, 0, 0))
+        cells = "".join(f"{_num(p.factor_ic.get(name)):>7}" for p in result.periods)
+        print(f"  {label:<24}{cells}{_num(m):>8}{_num(t):>8}{f'{pos}/{n}':>8}")
+    print("  Weights are the pillar's share of the composite. Each factor is oriented the way the")
+    print("  score uses it, so a positive IC means it helped; earnings yield is not in the score.")
+
+
 def print_backtest(result: BacktestResult) -> None:
     print()
     print(f"\033[1m  WALK-FORWARD BACKTEST — {result.horizon_days}-day forward returns\033[0m")
@@ -47,6 +81,9 @@ def print_backtest(result: BacktestResult) -> None:
         print(f"  DCF undervalued        {growth('undervalued_growth')}")
         rate, n_uv = s["undervalued_hit_rate"]
         print(f"  Undervalued hit rate   {_pct(rate, signed=False)} of {n_uv} calls beat the universe")
+
+    if s["periods"]:
+        _print_factor_table(result, s)
 
     print()
     print("  UV = names with P(value > price) > 50%.  IC = Spearman rank correlation with forward return.")
