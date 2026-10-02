@@ -88,6 +88,17 @@ def _fetch_cmp(symbol: str) -> Optional[float]:
     return price
 
 
+def _price_for(cd: CompanyData) -> Optional[float]:
+    """
+    The price to value `cd` against. A historical view uses only the price it
+    carries — falling back to the live quote would pair old fundamentals with
+    today's price — so without one, price-based outputs are left empty.
+    """
+    if cd.is_historical:
+        return cd.current_price
+    return cd.current_price or _fetch_cmp(cd.symbol)
+
+
 # ── India macro constants ──────────────────────────────────────────────────────
 # RF_RATE is fetched live from NSE/yfinance (24h cache) — never hardcoded.
 from src.utils.macro_rates import RFContext, get_rf_context
@@ -233,14 +244,17 @@ class DCFEngine:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def value(self, symbol: str, as_of: datetime | str | None = None) -> DCFResult:
+    def value(self, symbol: str, as_of: datetime | str | None = None,
+              data: Optional[CompanyData] = None) -> DCFResult:
         """
-        Value `symbol` from current data, or from the snapshot observed at `as_of`.
+        Value `symbol` from current data, from the snapshot observed at `as_of`,
+        or from an explicit CompanyData (the backtest passes one built with
+        CompanyData.as_of(), carrying the historical price).
 
-        Note `as_of` pins the fundamentals only; price and risk-free rate are
-        whatever this engine was given.
+        `as_of` pins the fundamentals only; the risk-free rate is whatever this
+        engine was given.
         """
-        cd = load_company(symbol, as_of=as_of, cache_dir=self.cache_dir)
+        cd = data if data is not None else load_company(symbol, as_of=as_of, cache_dir=self.cache_dir)
         if cd is None:
             return self._empty(symbol, "No cached data")
 
@@ -269,7 +283,7 @@ class DCFEngine:
         cash. Equity value is therefore EV minus *gross* borrowings — cash is
         already valued through its income, so it is not added again.
         """
-        cmp = cd.current_price or _fetch_cmp(symbol)
+        cmp = _price_for(cd)
         pl, bs = "profit_loss", "balance_sheet"
         n = len(cd.years(pl))
 
@@ -391,7 +405,7 @@ class DCFEngine:
         that are not free cash to equity — DCF overstates IV by 150%+.
         P/E vs sector peers gives a grounded relative valuation.
         """
-        cmp  = cd.current_price or _fetch_cmp(symbol)
+        cmp  = _price_for(cd)
 
         np_series  = cd.series("profit_loss", "Net Profit")
         eps_series = cd.series("profit_loss", "EPS in Rs")
@@ -451,7 +465,7 @@ class DCFEngine:
         BV grows each year by retained earnings: BV_t = BV_{t-1} × (1 + ROE_t × retention).
         Monte Carlo: draws on ROE₀ and CoE to produce P10/P90 bands.
         """
-        cmp  = cd.current_price or _fetch_cmp(symbol)
+        cmp  = _price_for(cd)
 
         np_series  = cd.series("profit_loss", "Net Profit")
         eps_series = cd.series("profit_loss", "EPS in Rs")

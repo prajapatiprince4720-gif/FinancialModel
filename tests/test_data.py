@@ -112,3 +112,46 @@ class TestReportingLag:
     ])
     def test_available_date(self, label, expected):
         assert fiscal_year_available_date(label) == expected
+
+
+class TestAsOfView:
+
+    def test_year_appears_only_once_results_are_public(self):
+        cd = CompanyData("X", _payload([1, 2, 3, 4]))
+        assert cd.as_of(date(2024, 5, 30)).years("profit_loss") == ["Mar 2022", "Mar 2023"]
+        assert cd.as_of(date(2024, 5, 31)).years("profit_loss") == ["Mar 2022", "Mar 2023", "Mar 2024"]
+
+    def test_statements_trimmed_together_and_ttm_dropped(self):
+        view = CompanyData("X", _payload([1, 2, 3, 4])).as_of(date(2024, 1, 1))
+        assert view.series("profit_loss", "Net Profit") == [1, 2]
+        assert view.series("balance_sheet", "Reserves") == [10, 20]
+        assert view.ttm("profit_loss", "Net Profit") is None
+
+    def test_before_first_release_is_empty(self):
+        view = CompanyData("X", _payload([1, 2, 3, 4])).as_of(date(2020, 1, 1))
+        assert view.years("profit_loss") == []
+        assert view.series("profit_loss", "Net Profit") == []
+
+    def test_price_replaced_and_source_tagged(self):
+        view = CompanyData("X", _payload([1, 2, 3, 4], price=500.0)).as_of(date(2024, 6, 1), price=120.0)
+        assert view.current_price == 120.0
+        assert view.source == "as_of:2024-06-01"
+        assert CompanyData("X", _payload([1, 2, 3, 4], price=500.0)).as_of(date(2024, 6, 1)).current_price is None
+
+    def test_original_is_not_mutated(self):
+        cd = CompanyData("X", _payload([1, 2, 3, 4], price=500.0))
+        cd.as_of(date(2023, 1, 1), price=1.0)
+        assert cd.years("profit_loss") == ["Mar 2022", "Mar 2023", "Mar 2024"]
+        assert cd.ttm("profit_loss", "Net Profit") == 4
+        assert cd.current_price == 500.0
+
+    def test_scorer_historical_mode_never_reads_the_cache(self, monkeypatch):
+        from src.scoring import composite_score
+
+        def _no_cache(*args, **kwargs):
+            raise AssertionError("historical scoring fell back to the cache")
+
+        monkeypatch.setattr(composite_score, "load_company", _no_cache)
+        view = CompanyData("TCS", _payload([1, 2, 3, 4])).as_of(date(2024, 6, 1), price=100.0)
+        # INFY has no historical view: it must be skipped, not loaded from today's cache.
+        composite_score.CompositeScorer().score_all(["TCS", "INFY"], data={"TCS": view})

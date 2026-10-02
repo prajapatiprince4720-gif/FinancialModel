@@ -124,6 +124,11 @@ class CompanyData:
     def current_price(self) -> Optional[float]:
         return self.raw.get("current_price")
 
+    @property
+    def is_historical(self) -> bool:
+        """True for a view built by as_of(); its price must never be fetched live."""
+        return self.source.startswith("as_of:")
+
     # ── Series access ─────────────────────────────────────────────────────────
 
     def years(self, section: str = "profit_loss") -> list[str]:
@@ -147,6 +152,36 @@ class CompanyData:
     def series(self, section: str, *keys: str) -> list[float]:
         """Full-year values with gaps removed (legacy behaviour, for averages/tails)."""
         return [v for v in self.aligned(section, *keys) if v is not None]
+
+    def as_of(self, when: date, price: Optional[float] = None) -> "CompanyData":
+        """
+        The statements as an investor could have seen them on `when`.
+
+        Each statement keeps only the full fiscal years whose results were public
+        by then (fiscal_year_available_date ≤ when); TTM and interim columns go.
+        `price` replaces current_price so nothing downstream fetches today's
+        price into a historical valuation.
+
+        Limitation: Screener shows figures as later restated, not as first
+        reported. Restatements are usually small, but this is not a true
+        point-in-time database for dates before snapshots began.
+        """
+        raw: dict[str, Any] = {k: v for k, v in self.raw.items() if k not in STATEMENTS}
+        raw["current_price"] = price
+        for sec in STATEMENTS:
+            src_sec = self.raw.get(sec) or {}
+            years   = (src_sec.get("years") or [])[: self._cuts.get(sec, 0)]
+            keep = 0
+            for label in years:
+                avail = fiscal_year_available_date(label)
+                if avail is None or avail > when:
+                    break
+                keep += 1
+            raw[sec] = {
+                "years": list(years[:keep]),
+                "rows":  {k: list(v[:keep]) for k, v in (src_sec.get("rows") or {}).items()},
+            }
+        return CompanyData(self.symbol, raw, source=f"as_of:{when.isoformat()}")
 
     def ttm(self, section: str, key: str) -> Optional[float]:
         """The trailing-twelve-month value, if the statement has a TTM column."""

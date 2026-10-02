@@ -196,3 +196,37 @@ class TestShareCount:
         from src.valuation.dcf_engine import DCFEngine
         e = DCFEngine(rf_context=FIXED_RF, quiet=True)
         assert e._shares([100.0], [0.0]) == 0.0
+
+
+class TestHistoricalPrice:
+    """A historical view must never be valued against today's live price."""
+
+    @pytest.fixture(autouse=True)
+    def _no_live_price(self, monkeypatch):
+        def _fail(symbol):
+            raise AssertionError("historical valuation fetched a live price")
+        monkeypatch.setattr("src.valuation.dcf_engine._fetch_cmp", _fail)
+
+    # One company per valuation path: value-driver, bank, insurer.
+    @pytest.mark.parametrize("symbol", ["TCS", "HDFCBANK", "HDFCLIFE"])
+    def test_without_price_outputs_stay_empty(self, symbol):
+        from datetime import date
+        from src.data import load_company
+        from src.valuation.dcf_engine import DCFEngine
+        cd = load_company(symbol)
+        if cd is None:
+            pytest.skip(f"{symbol} not in local cache")
+        r = DCFEngine(rf_context=FIXED_RF, quiet=True).value(symbol, data=cd.as_of(date(2022, 6, 1)))
+        assert r.cmp is None
+        assert r.margin_of_safety is None
+
+    @pytest.mark.parametrize("symbol", ["TCS", "HDFCBANK", "HDFCLIFE"])
+    def test_supplied_price_is_used(self, symbol):
+        from datetime import date
+        from src.data import load_company
+        from src.valuation.dcf_engine import DCFEngine
+        cd = load_company(symbol)
+        if cd is None:
+            pytest.skip(f"{symbol} not in local cache")
+        r = DCFEngine(rf_context=FIXED_RF, quiet=True).value(symbol, data=cd.as_of(date(2022, 6, 1), price=1234.0))
+        assert r.cmp == 1234.0

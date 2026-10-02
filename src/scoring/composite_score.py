@@ -46,8 +46,18 @@ class CompositeScorer:
     def __init__(self, cache_dir: str = "data/raw/screener"):
         self.cache_dir = Path(cache_dir)
 
-    def score_all(self, symbols: list[str]) -> list[ScoreResult]:
-        raw = {sym: self._extract(sym) for sym in symbols}
+    def score_all(self, symbols: list[str],
+                  data: Optional[dict[str, CompanyData]] = None) -> list[ScoreResult]:
+        """
+        Score `symbols` from the current cache, or from `data` (symbol →
+        CompanyData) — the backtest passes historical as-of views.
+        """
+        if data is None:
+            raw = {sym: self._extract(sym) for sym in symbols}
+        else:
+            # Historical mode: only the supplied views. Falling back to the cache
+            # for a missing symbol would leak today's data into the past.
+            raw = {sym: self._extract(sym, data[sym]) for sym in symbols if sym in data}
         raw = {k: v for k, v in raw.items() if v is not None}
         if not raw:
             return []
@@ -56,8 +66,8 @@ class CompositeScorer:
 
     # ── Per-company raw metric extraction ─────────────────────────────────────
 
-    def _extract(self, symbol: str) -> Optional[dict]:
-        cd = load_company(symbol, cache_dir=self.cache_dir)
+    def _extract(self, symbol: str, cd: Optional[CompanyData] = None) -> Optional[dict]:
+        cd = cd or load_company(symbol, cache_dir=self.cache_dir)
         if cd is None:
             return None
 
