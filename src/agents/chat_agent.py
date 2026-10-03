@@ -52,6 +52,13 @@ class ChatAgent:
         self.history: list[dict[str, str]] = []
 
     def ask(self, user_message: str) -> str:
+        from src.reports.request import wants_pdf
+        if wants_pdf(user_message):
+            response = self._handle_pdf(user_message)
+            self.history.append({"role": "user", "content": user_message})
+            self.history.append({"role": "assistant", "content": response})
+            return response
+
         route = self.router.route(user_message)
         logger.info(f"[Chat] intent={route.intent} tickers={route.tickers} top_n={route.top_n} amount={route.amount}")
 
@@ -125,6 +132,28 @@ class ChatAgent:
 
     def clear_history(self) -> None:
         self.history.clear()
+
+    def _handle_pdf(self, user_message: str) -> str:
+        """Build a research-pack PDF for whatever companies and sections the message asks for."""
+        from src.reports.request import SECTIONS, parse_request
+        from src.reports.research_pack import build_research_pack
+
+        spec = parse_request(user_message, llm=self.llm)
+        if not spec.ok:
+            return " ".join(spec.errors)
+        names = ", ".join(NIFTY50_TICKERS.get(s, s) for s in spec.symbols)
+        print(f"  Building research pack for {names}...")
+        try:
+            path = build_research_pack(spec)
+        except Exception as exc:
+            logger.exception("[Chat] research pack failed")
+            return f"Sorry — the PDF could not be built ({exc})."
+        contents = "\n".join(f"  • {SECTIONS[s]}" for s in spec.sections)
+        return (f"Your PDF is ready: `{path}`\n\n"
+                f"**Companies:** {names}\n_{spec.selection}_\n\n"
+                f"**Contents** (last {spec.years} years):\n{contents}\n\n"
+                f"Every figure comes from reported financials; management goals are quoted from "
+                f"their earnings calls. Not SEBI-registered investment advice.")
 
     # ──────────────────────────────────────────────────────────────────────────
 

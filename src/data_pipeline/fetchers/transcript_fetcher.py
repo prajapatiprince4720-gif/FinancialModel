@@ -39,13 +39,14 @@ logger = get_logger(__name__)
 _MONTHS = ("January|February|March|April|May|June|July|August|September|"
            "October|November|December")
 # "quarter ended March 31, 2026", "quarter and year ended March 31, 2026",
-# "fourth quarter and financial year ended 31st March, 2026"
-_PERIOD_END = re.compile(
-    rf"(?:quarter|period)[\w\s,'-]{{0,40}}?\s+ended\s+"
-    rf"(?:({_MONTHS})\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})"
-    rf"|(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTHS}),?\s+(\d{{4}}))",
-    re.IGNORECASE,
-)
+# "fourth quarter and financial year ended 31st March, 2026",
+# "first quarter (Q1) ended June 30, 2026"
+_DATE = (rf"(?:({_MONTHS})\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})"
+         rf"|(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTHS}),?\s+(\d{{4}}))")
+_PERIOD_END = re.compile(rf"(?:quarter|period)[\w\s,'()-]{{0,40}}?\s+ended\s+{_DATE}", re.IGNORECASE)
+# "for the year ended March 31st, 2026" — a full-year (Q4) call. Only used when no
+# quarter is stated, because other calls mention the previous year in passing.
+_YEAR_END = re.compile(rf"\byear\s+ended\s+{_DATE}", re.IGNORECASE)
 # "Q4 FY26", "Q1 FY '27", "Q3 FY2026"
 _QUARTER_FY = re.compile(r"\bQ([1-4])\s*FY\s*'?\s*(\d{4}|\d{2})\b", re.IGNORECASE)
 # Infosys states it only in its results URL: ".../quarterly-results/2026-2027/q1.html"
@@ -106,23 +107,30 @@ def period_end_from_text(text: str) -> Optional[date]:
     """
     head = " ".join(text[:_SCAN_CHARS].split())
     m = _PERIOD_END.search(head)
-    if m:
-        if m.group(1):
-            month, day, year = m.group(1), m.group(2), m.group(3)
-        else:
-            day, month, year = m.group(4), m.group(5), m.group(6)
-        try:
-            return datetime.strptime(f"{month} {day} {year}", "%B %d %Y").date()
-        except ValueError:
-            pass
+    if m and (d := _match_date(m)):
+        return d
     q = _QUARTER_FY.search(head)
     if q:
         fy = int(q.group(2)) if len(q.group(2)) == 4 else 2000 + int(q.group(2))
         return _quarter_end(int(q.group(1)), fy)
+    y = _YEAR_END.search(head)
+    if y and (d := _match_date(y)) and d.month == 3:
+        return d
     u = _RESULTS_URL.search(head.replace(" ", ""))
     if u and int(u.group(2)) == int(u.group(1)) + 1:
         return _quarter_end(int(u.group(3)), int(u.group(2)))
     return None
+
+
+def _match_date(m: re.Match) -> Optional[date]:
+    if m.group(1):
+        month, day, year = m.group(1), m.group(2), m.group(3)
+    else:
+        day, month, year = m.group(4), m.group(5), m.group(6)
+    try:
+        return datetime.strptime(f"{month} {day} {year}", "%B %d %Y").date()
+    except ValueError:
+        return None
 
 
 def _label_matches(label: str, period_end: date) -> bool:

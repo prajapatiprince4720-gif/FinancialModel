@@ -580,6 +580,29 @@ def cmd_status(args):
         print("  (empty — run: python main.py ingest --ticker RELIANCE.NS)")
 
 
+def cmd_report(args):
+    """Research-pack PDF from a free-text request."""
+    from src.reports.request import parse_request
+    from src.reports.research_pack import build_research_pack
+
+    llm = None
+    try:
+        from src.llm import get_llm_client
+        llm = get_llm_client()
+    except Exception:
+        pass                    # the rule parser still handles most requests
+    spec = parse_request(args.request, llm=llm)
+    if not spec.ok:
+        for e in spec.errors:
+            print(f"\n  {e}\n")
+        return
+    print(f"\n  Companies : {', '.join(spec.symbols)}  ({spec.selection})")
+    print(f"  Sections  : {', '.join(spec.sections)}   History: {spec.years} years")
+    print("  Building research pack...")
+    path = build_research_pack(spec, output_dir=args.output)
+    print(f"\n  PDF saved → {path}\n  Open with: open '{path}'\n")
+
+
 def cmd_backtest(args):
     """Walk-forward backtest of the composite score and the DCF."""
     from src.backtest import rebalance_dates, run_backtest
@@ -589,6 +612,13 @@ def cmd_backtest(args):
     print(f"\nBacktesting {dates[0]} → {dates[-1]} ({len(dates)} rebalance dates)...")
     result = run_backtest(dates, horizon_days=args.horizon, refresh_prices=args.refresh_prices)
     print_backtest(result)
+
+    # Reports cite the standard run only; a custom window or horizon is exploratory.
+    if (args.start, args.end, args.horizon) == (2018, 2025, 365):
+        from src.backtest.track_record import save_track_record
+        path = save_track_record(result)
+        if path:
+            print(f"  Track record saved → {path} (shown in PDF reports)\n")
 
 
 def cmd_macro(args):
@@ -725,6 +755,13 @@ def main():
                          help="Manually set the 10Y GSEC yield in %% (e.g. --set 6.75). "
                               "Check https://www.nseindia.com/market-data/bonds-trading-information")
     p_macro.set_defaults(func=cmd_macro)
+
+    # ── report ──
+    p_rep = subparsers.add_parser("report", help="Research-pack PDF from a plain-English request")
+    p_rep.add_argument("request", type=str,
+                       help='e.g. "last 5 years P&L of the top 5 IT companies, their goals, investable?"')
+    p_rep.add_argument("--output", type=str, default="reports", help="Output folder (default: reports)")
+    p_rep.set_defaults(func=cmd_report)
 
     # ── backtest ──
     p_bt = subparsers.add_parser("backtest", help="Walk-forward backtest of the composite score and DCF")

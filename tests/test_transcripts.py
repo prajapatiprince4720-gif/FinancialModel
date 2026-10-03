@@ -49,6 +49,14 @@ class TestParsing:
         # INFY — only the results URL says which quarter
         ("hosted at https://www.infosys.com/investors/reports-filings/quarterly-results/2026- "
          "2027/q1.html", date(2026, 6, 30)),
+        # BHARTIARTL — bracketed quarter label
+        ("results of the Company for the first quarter (Q1) ended June 30, 2026.", date(2026, 6, 30)),
+        # HDFCLIFE — a full-year call states only the year end
+        ("Sub: Transcript of Earnings Conference Call - FY’26 ... performance of the Company for "
+         "the year ended March 31st, 2026.", date(2026, 3, 31)),
+        # a stated quarter wins over a passing mention of the previous year
+        ("for the quarter ended June 30, 2026, compared with the year ended March 31, 2026",
+         date(2026, 6, 30)),
         # an investor day is not an earnings call
         ("Sub: Transcript of the Infosys Limited Investor AI Day 2026", None),
     ])
