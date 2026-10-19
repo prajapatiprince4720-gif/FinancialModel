@@ -1,7 +1,7 @@
 #!/bin/bash
 # Daily FAQ training — runs at 7 AM, trains next 8 companies, stops itself when all 50 are done.
 
-PROJECT_DIR="$HOME/Documents/GitHub/FinancialModel"
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV="$PROJECT_DIR/venv/bin/activate"
 LOG="$PROJECT_DIR/logs/faq_training.log"
 PLIST="$HOME/Library/LaunchAgents/com.equitylens.faq-train.plist"
@@ -24,13 +24,14 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') — Training batch finished (exit code: $EXIT
 PENDING=$(python -c "
 import os, json
 from config.nifty50_tickers import NIFTY50_TICKERS
+from src.training.faq_trainer import TRAINED_THRESHOLD
 count = 0
 for sym in NIFTY50_TICKERS:
     p = f'data/faq_cache/{sym}_faq.json'
     if os.path.exists(p):
         try:
             with open(p) as f:
-                if len(json.load(f)) > 0:
+                if len(json.load(f)) >= TRAINED_THRESHOLD:
                     continue
         except: pass
     count += 1

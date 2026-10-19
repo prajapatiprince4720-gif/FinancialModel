@@ -37,6 +37,9 @@ logger = get_logger(__name__)
 # How many questions to answer in a single LLM call
 BATCH_SIZE = 15
 
+# A ticker counts as fully trained once its cache holds this many Q&As (of ~180)
+TRAINED_THRESHOLD = 150
+
 # Sections to retrieve context from for each question batch
 CONTEXT_SECTIONS = [
     "company_profile", "key_ratios", "income_statement",
@@ -74,6 +77,8 @@ class FAQTrainer:
         self.embedder = get_embedding_model()
         self.store = VectorStore()
         ensure_dir("data/faq_cache")
+        # Set once the LLM provider's daily token quota is hit; callers should stop training
+        self.quota_exhausted = False
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
@@ -92,6 +97,8 @@ class FAQTrainer:
             logger.info(f"[FAQ] {ticker_yf}: loading from cache ({cache_path})")
             with open(cache_path) as f:
                 qa_pairs = json.load(f)
+            if len(qa_pairs) < TRAINED_THRESHOLD:
+                qa_pairs = self._resume_partial(ticker_yf, company_name, nse_symbol, qa_pairs, cache_path)
         else:
             questions = get_questions(nse_symbol, company_name)
             logger.info(f"[FAQ] {ticker_yf}: {len(questions)} questions → answering in batches of {BATCH_SIZE}")
@@ -140,6 +147,28 @@ class FAQTrainer:
     # Internal
     # ──────────────────────────────────────────────────────────────────────────
 
+    def _resume_partial(
+        self,
+        ticker: str,
+        company_name: str,
+        nse_symbol: str,
+        qa_pairs: list[dict[str, str]],
+        cache_path: str,
+    ) -> list[dict[str, str]]:
+        """Answer only the questions missing from a partial cache and merge them in."""
+        answered = {p.get("question") for p in qa_pairs}
+        missing = [q for q in get_questions(nse_symbol, company_name) if q not in answered]
+        if not missing:
+            return qa_pairs
+        logger.info(f"[FAQ] {ticker}: resuming — {len(qa_pairs)} cached, {len(missing)} missing")
+        new_pairs = self._answer_all_batches(ticker, company_name, missing)
+        if new_pairs:
+            qa_pairs = qa_pairs + new_pairs
+            with open(cache_path, "w") as f:
+                json.dump(qa_pairs, f, indent=2)
+            logger.info(f"[FAQ] {ticker}: cached {len(qa_pairs)} Q&A pairs (+{len(new_pairs)})")
+        return qa_pairs
+
     def _answer_all_batches(
         self,
         ticker: str,
@@ -164,6 +193,7 @@ class FAQTrainer:
                 if "tokens per day" in err or "TPD" in err:
                     # Daily quota exhausted — stop cleanly, save what we have
                     logger.warning(f"[FAQ] Daily token quota reached at batch {batch_idx + 1}. Saving {len(all_qa)} answers so far.")
+                    self.quota_exhausted = True
                     break
                 elif "rate_limit" in err or "429" in err:
                     # Per-minute limit — wait and retry once

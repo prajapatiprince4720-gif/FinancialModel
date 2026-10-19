@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     # LLM provider — "gemini" | "groq" | "claude"
     llm_provider: str = "gemini"
     groq_api_key: str = Field(default="", description="Groq API key (free at console.groq.com)")
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-120b"
     gemini_api_key: str = Field(default="", description="Google Gemini key (free at aistudio.google.com)")
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-3.8-flash"
 
     # News (optional — falls back to free RSS feeds when blank)
     news_api_key: str = Field(default="", description="NewsAPI.org key")

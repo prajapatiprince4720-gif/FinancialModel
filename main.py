@@ -329,7 +329,7 @@ def cmd_portfolio(args):
 
 def cmd_train(args):
     import os
-    from src.training.faq_trainer import FAQTrainer
+    from src.training.faq_trainer import FAQTrainer, TRAINED_THRESHOLD
     from config.nifty50_tickers import NIFTY50_TICKERS
 
     trainer = FAQTrainer()
@@ -343,7 +343,7 @@ def cmd_train(args):
             if os.path.exists(cache):
                 with open(cache) as f:
                     count = len(json.load(f))
-                if count > 0:
+                if count >= TRAINED_THRESHOLD:
                     done.append((sym, name, count))
                 else:
                     pending.append((sym, name))
@@ -377,14 +377,13 @@ def cmd_train(args):
 
     # Find untrained / under-trained companies (threshold: 150 of 180 Q&As)
     import json as _json
-    _TRAINED_THRESHOLD = 150
     def _is_trained(sym: str) -> bool:
         path = f"data/faq_cache/{sym}_faq.json"
         if not os.path.exists(path):
             return False
         try:
             with open(path) as f:
-                return len(_json.load(f)) >= _TRAINED_THRESHOLD
+                return len(_json.load(f)) >= TRAINED_THRESHOLD
         except Exception:
             return False
 
@@ -420,10 +419,13 @@ def cmd_train(args):
         try:
             n = trainer.train_ticker(ticker_yf, refresh=args.refresh)
             results[ticker_yf] = n
-            print(f"       ✓ {n} Q&A pairs stored\n")
+            print(f"       {'✓' if n else '✗'} {n} Q&A pairs stored\n")
         except Exception as exc:
             print(f"       ✗ Failed: {exc}\n")
             results[ticker_yf] = -1
+        if trainer.quota_exhausted:
+            print("       ⚠ Daily LLM token quota reached — stopping; rerun tomorrow to resume.\n")
+            break
 
     success = sum(1 for v in results.values() if v > 0)
     total_done = len(all_symbols) - len(untrained) + success
@@ -539,6 +541,23 @@ def cmd_status(args):
             print(f"  ✓ {t}")
     else:
         print("  (empty — run: python main.py ingest --ticker RELIANCE.NS)")
+
+
+def cmd_eval(args):
+    from src.eval import benchmark, runner
+
+    if args.action == "build":
+        questions = benchmark.build()
+        benchmark.save(questions)
+        from collections import Counter
+        counts = Counter(q["category"] for q in questions)
+        print(f"\nBuilt {len(questions)} questions → {benchmark.BENCHMARK_PATH}")
+        for cat, n in counts.items():
+            print(f"    {cat:14s} {n}")
+        return
+    if args.action == "run":
+        runner.run(args.system, args.provider, limit=args.limit)
+    runner.report()
 
 
 def cmd_macro(args):
@@ -674,6 +693,14 @@ def main():
                          help="Manually set the 10Y GSEC yield in %% (e.g. --set 6.75). "
                               "Check https://www.nseindia.com/market-data/bonds-trading-information")
     p_macro.set_defaults(func=cmd_macro)
+
+    # ── eval ──
+    p_eval = subparsers.add_parser("eval", help="Benchmark answer accuracy against gold answers from Screener data")
+    p_eval.add_argument("action", choices=["build", "run", "report"], help="build the question set, run a system, or show scores")
+    p_eval.add_argument("--system", choices=["equitylens", "llm_only"], default="equitylens")
+    p_eval.add_argument("--provider", choices=["groq", "gemini", "claude"], default="groq")
+    p_eval.add_argument("--limit", type=int, help="Run at most N new questions this time")
+    p_eval.set_defaults(func=cmd_eval)
 
     args = parser.parse_args()
     args.func(args)

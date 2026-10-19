@@ -23,6 +23,7 @@ from src.llm.prompts.investor_qa import (
     INVESTOR_FAQ,
     build_investor_qa_query,
 )
+from src.rag.financial_facts import FinancialFacts
 from src.rag.retriever import Retriever
 from src.utils.logger import get_logger
 
@@ -41,6 +42,7 @@ class InvestorQAAgent:
     def __init__(self) -> None:
         self.llm = get_llm_client()
         self.retriever = Retriever()
+        self.facts = FinancialFacts()
 
     def ask(self, question: str, ticker: str = "") -> str:
         """
@@ -51,33 +53,42 @@ class InvestorQAAgent:
             ticker:   Optional yfinance ticker (e.g. 'RELIANCE.NS') for stock-specific questions.
                       If not provided, the agent tries to detect the stock from the question.
         """
-        # Check FAQ cache first for instant answers
-        faq_answer = self._check_faq(question)
-        if faq_answer:
-            return faq_answer
-
         # Detect ticker from question if not provided
         if not ticker:
             ticker = self._detect_ticker(question)
+        if not ticker:
+            symbols = self.facts.detect_symbols(question)
+            ticker = f"{symbols[0]}.NS" if symbols else ""
+
+        # Canned answers only for generic concept questions, never stock-specific ones
+        if not ticker:
+            faq_answer = self._check_faq(question)
+            if faq_answer:
+                return faq_answer
+
+        # Exact figures straight from Screener data — search is unreliable for specific years
+        facts = self.facts.for_question(question, ticker=ticker)
 
         # Fetch relevant context if a stock was mentioned
         context = ""
         if ticker:
+            sections = ["faq", "company_profile", "key_ratios", "screener_peers"]
+            if not facts:
+                # no verified figures available — fall back to the per-year statement chunks
+                sections += ["income_statement", "screener_profit_loss",
+                             "screener_ratios", "screener_balance_sheet"]
             results = self.retriever.retrieve_multi_section(
                 query=question,
                 ticker=ticker,
-                sections=[
-                    "faq",                          # pre-trained Q&A pairs (highest relevance)
-                    "company_profile", "key_ratios", "income_statement",
-                    "screener_profit_loss", "screener_ratios", "screener_peers",
-                    "screener_balance_sheet",
-                ],
-                top_k_per_section=3,
+                sections=sections,
+                top_k_per_section=2 if facts else 3,
             )
             context = self.retriever.format_context(results)
             logger.info(f"[InvestorQA] Retrieved {len(results)} chunks for {ticker}")
         else:
             logger.info(f"[InvestorQA] Concept question — no stock retrieval")
+        if facts:
+            context = f"{facts}\n\nBACKGROUND (may be approximate — figures above take precedence):\n{context}"
 
         user_message = build_investor_qa_query(question, context=context, ticker=ticker)
         response = self.llm.complete(
@@ -91,7 +102,7 @@ class InvestorQAAgent:
         """Return a canned FAQ answer if the question is a close match."""
         q = question.lower().strip().rstrip("?").strip()
         for key, answer in INVESTOR_FAQ.items():
-            if key in q or q in key:
+            if key in q:
                 return answer
         return ""
 
