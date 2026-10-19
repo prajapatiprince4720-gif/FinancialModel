@@ -218,3 +218,12 @@ class ScreenerFetcher:
         with open(path, "w") as f:
             json.dump(data, f, indent=2, default=str)
         logger.info(f"[Screener] Saved data for {nse_symbol} → {path}")
+
+        # Keep history: the JSON above is overwritten on every refresh, the
+        # snapshot store is append-only (new rows only when the numbers change).
+        try:
+            from src.data.snapshots import get_snapshot_store
+            if get_snapshot_store().save(nse_symbol, data):
+                logger.info(f"[Screener] {nse_symbol}: new snapshot recorded")
+        except Exception as exc:
+            logger.warning(f"[Screener] {nse_symbol}: snapshot not recorded: {exc}")

@@ -8,18 +8,16 @@ All scores are percentile-ranked within the universe (0 = worst, 100 = best).
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
+from src.data.company import LENDERS, CompanyData, load_company
+
 # Symbols that need bank-specific quality metrics
-_BANK_SYMS: set[str] = {
-    "HDFCBANK", "ICICIBANK", "AXISBANK", "KOTAKBANK", "SBIN", "INDUSINDBK",
-    "BAJFINANCE", "SHRIRAMFIN", "BAJAJFINSV",
-}
+_BANK_SYMS = LENDERS
 
 
 @dataclass
@@ -48,8 +46,18 @@ class CompositeScorer:
     def __init__(self, cache_dir: str = "data/raw/screener"):
         self.cache_dir = Path(cache_dir)
 
-    def score_all(self, symbols: list[str]) -> list[ScoreResult]:
-        raw = {sym: self._extract(sym) for sym in symbols}
+    def score_all(self, symbols: list[str],
+                  data: Optional[dict[str, CompanyData]] = None) -> list[ScoreResult]:
+        """
+        Score `symbols` from the current cache, or from `data` (symbol →
+        CompanyData) — the backtest passes historical as-of views.
+        """
+        if data is None:
+            raw = {sym: self._extract(sym) for sym in symbols}
+        else:
+            # Historical mode: only the supplied views. Falling back to the cache
+            # for a missing symbol would leak today's data into the past.
+            raw = {sym: self._extract(sym, data[sym]) for sym in symbols if sym in data}
         raw = {k: v for k, v in raw.items() if v is not None}
         if not raw:
             return []
@@ -58,58 +66,36 @@ class CompositeScorer:
 
     # ── Per-company raw metric extraction ─────────────────────────────────────
 
-    def _extract(self, symbol: str) -> Optional[dict]:
-        path = self.cache_dir / f"{symbol}.json"
-        if not path.exists():
+    def _extract(self, symbol: str, cd: Optional[CompanyData] = None) -> Optional[dict]:
+        cd = cd or load_company(symbol, cache_dir=self.cache_dir)
+        if cd is None:
             return None
-        with open(path) as f:
-            data = json.load(f)
 
-        pl      = data.get("profit_loss", {})
-        bs      = data.get("balance_sheet", {})
-        cf      = data.get("cash_flow", {})
-        rat     = data.get("ratios", {})
-
-        years    = pl.get("years", [])
-        pl_rows  = pl.get("rows", {})
-        bs_rows  = bs.get("rows", {})
-        cf_rows  = cf.get("rows", {})
-        rat_rows = rat.get("rows", {})
-
-        n   = len(years)
-        cut = n - 1 if years and "TTM" in str(years[-1]) else n
-
-        def _s(rows, key):
-            return [v for v in rows.get(key, [])[:cut] if v is not None]
-
-        is_bank = symbol in _BANK_SYMS
-
-        np_ser  = _s(pl_rows, "Net Profit")
-        eps_ser = _s(pl_rows, "EPS in Rs")
-        int_ser = _s(pl_rows, "Interest")
-        dep_ser = _s(pl_rows, "Depreciation")
-        pbt_ser = _s(pl_rows, "Profit before tax")
-        cfo_ser = _s(cf_rows, "Cash from Operating Activity")
-        fcf_ser = _s(cf_rows, "Free Cash Flow")
-        # Balance sheet — fix: banks store "Borrowing" (singular)
-        borr_ser   = _s(bs_rows, "Borrowings") or _s(bs_rows, "Borrowing")
-        eq_cap     = _s(bs_rows, "Equity Capital")
-        reserves   = _s(bs_rows, "Reserves")
-        tot_assets = _s(bs_rows, "Total Assets")
+        np_ser  = cd.series("profit_loss", "Net Profit")
+        eps_ser = cd.series("profit_loss", "EPS in Rs")
+        int_ser = cd.series("profit_loss", "Interest")
+        dep_ser = cd.series("profit_loss", "Depreciation")
+        pbt_ser = cd.series("profit_loss", "Profit before tax")
+        cfo_ser = cd.series("cash_flow", "Cash from Operating Activity")
+        fcf_ser = cd.series("cash_flow", "Free Cash Flow")
+        # Balance sheet — banks store "Borrowing" (singular)
+        borr_ser   = cd.series("balance_sheet", "Borrowings", "Borrowing")
+        eq_cap     = cd.series("balance_sheet", "Equity Capital")
+        reserves   = cd.series("balance_sheet", "Reserves")
+        tot_assets = cd.series("balance_sheet", "Total Assets")
         eq_book    = (eq_cap[-1] + reserves[-1]) if eq_cap and reserves else 1
         de_ratio   = borr_ser[-1] / eq_book if borr_ser and eq_book > 0 else 0.0
 
-        if is_bank:
+        if cd.is_lender:
             return self._extract_bank(
-                symbol, pl_rows, bs_rows, rat_rows, cf_rows,
-                np_ser, eps_ser, int_ser, cfo_ser, fcf_ser,
-                borr_ser, eq_cap, reserves, tot_assets, de_ratio, cut,
+                cd, np_ser, eps_ser, int_ser, cfo_ser, fcf_ser,
+                borr_ser, eq_cap, reserves, tot_assets, de_ratio,
             )
 
         # ── Non-financial extraction ──────────────────────────────────────────
-        sales_ser = _s(pl_rows, "Sales")
-        opm_ser   = _s(pl_rows, "OPM %")
-        roce_ser  = _s(rat_rows, "ROCE %")
+        sales_ser = cd.series("profit_loss", "Sales")
+        opm_ser   = cd.series("profit_loss", "OPM %")
+        roce_ser  = cd.series("ratios", "ROCE %")
 
         roce_3y = self._tail_avg(roce_ser, 3)
         opm_3y  = self._tail_avg(opm_ser, 3)
@@ -151,19 +137,13 @@ class CompositeScorer:
         }
 
     def _extract_bank(
-        self, symbol: str,
-        pl_rows, bs_rows, rat_rows, cf_rows,
+        self, cd: CompanyData,
         np_ser, eps_ser, int_ser, cfo_ser, fcf_ser,
-        borr_ser, eq_cap, reserves, tot_assets, de_ratio, cut,
+        borr_ser, eq_cap, reserves, tot_assets, de_ratio,
     ) -> dict:
         """Bank-specific metrics: ROE → roce_3y, NIM → opm_3y, ROA → int_cov."""
-
-        def _s(rows, key):
-            return [v for v in rows.get(key, [])[:cut] if v is not None]
-
-        roe_ser = _s(rat_rows, "ROE %")
-        rev_ser = _s(pl_rows, "Revenue")    # banks: total interest income
-        div_ser = _s(pl_rows, "Dividend Payout %")
+        roe_ser = cd.series("ratios", "ROE %")
+        rev_ser = cd.series("profit_loss", "Revenue")    # banks: total interest income
 
         # ROE quality metric (3Y avg)
         roe_3y = self._tail_avg(roe_ser, 3)
@@ -296,24 +276,39 @@ class CompositeScorer:
 
     def _rank_and_score(self, raw: dict[str, dict], all_syms: list[str]) -> list[ScoreResult]:
         syms = list(raw.keys())
-        n    = len(syms)
+        # Peer group per symbol. Lenders store ROE/NIM/ROA/margin/bank-Piotroski in
+        # the same fields non-lenders use for ROCE/OPM/IntCov/CFO-NP/Piotroski, and
+        # a bank's 4% NIM ranked against a manufacturer's 20% OPM always lands at
+        # the bottom. Those metrics are therefore ranked within the peer group.
+        groups = np.array([raw[s]["is_bank"] for s in syms])
 
-        def _pct(vals: list[float], higher_better: bool = True) -> list[float]:
-            arr   = np.array(vals, dtype=float)
+        def _rank(arr: np.ndarray) -> np.ndarray:
             ranks = np.array([np.sum(arr < v) for v in arr], dtype=float)
-            pcts  = ranks / max(n - 1, 1) * 100
+            return ranks / max(len(arr) - 1, 1) * 100
+
+        def _pct(vals: list[float], higher_better: bool = True,
+                 by_peer: bool = False) -> np.ndarray:
+            arr  = np.array(vals, dtype=float)
+            pcts = np.empty_like(arr)
+            if by_peer:
+                for g in (True, False):
+                    mask = groups == g
+                    if mask.any():
+                        pcts[mask] = _rank(arr[mask])
+            else:
+                pcts = _rank(arr)
             return pcts if higher_better else (100 - pcts)
 
-        roce_pct = _pct([raw[s]["roce_3y"]       for s in syms])
-        opm_pct  = _pct([raw[s]["opm_3y"]        for s in syms])
-        de_pct   = _pct([raw[s]["de_ratio"]       for s in syms], higher_better=False)
-        ic_pct   = _pct([raw[s]["int_cov"]        for s in syms])
+        roce_pct = _pct([raw[s]["roce_3y"]       for s in syms], by_peer=True)
+        opm_pct  = _pct([raw[s]["opm_3y"]        for s in syms], by_peer=True)
+        de_pct   = _pct([raw[s]["de_ratio"]       for s in syms], higher_better=False, by_peer=True)
+        ic_pct   = _pct([raw[s]["int_cov"]        for s in syms], by_peer=True)
         rev_pct  = _pct([raw[s]["rev_cagr"]       for s in syms])
         eps_pct  = _pct([raw[s]["eps_cagr"]       for s in syms])
         fcf_pct  = _pct([raw[s]["fcf_cagr"]       for s in syms])
-        cfo_pct  = _pct([raw[s]["cfo_np_ratio"]   for s in syms])
-        acc_pct  = _pct([raw[s]["accrual_ratio"]  for s in syms], higher_better=False)
-        pio_pct  = _pct([raw[s]["piotroski"]      for s in syms])
+        cfo_pct  = _pct([raw[s]["cfo_np_ratio"]   for s in syms], by_peer=True)
+        acc_pct  = _pct([raw[s]["accrual_ratio"]  for s in syms], higher_better=False, by_peer=True)
+        pio_pct  = _pct([raw[s]["piotroski"]      for s in syms], by_peer=True)
 
         results = []
         for i, sym in enumerate(syms):

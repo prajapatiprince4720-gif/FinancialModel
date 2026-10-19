@@ -12,8 +12,10 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # Anthropic
-    anthropic_api_key: str = Field(..., description="Anthropic API key")
+    # Anthropic — optional: only required when LLM_PROVIDER=claude.
+    # Previously mandatory, which stopped the app booting for anyone running the
+    # free Groq or Gemini path.
+    anthropic_api_key: str = Field(default="", description="Anthropic API key")
     claude_model: str = "claude-sonnet-4-6"
     claude_max_tokens: int = 4096
 
@@ -22,7 +24,7 @@ class Settings(BaseSettings):
     groq_api_key: str = Field(default="", description="Groq API key (free at console.groq.com)")
     groq_model: str = "openai/gpt-oss-120b"
     gemini_api_key: str = Field(default="", description="Google Gemini key (free at aistudio.google.com)")
-    gemini_model: str = "gemini-3.8-flash"
+    gemini_model: str = "gemini-3.1-flash-lite"
 
     # News (optional — falls back to free RSS feeds when blank)
     news_api_key: str = Field(default="", description="NewsAPI.org key")
@@ -49,7 +51,8 @@ class Settings(BaseSettings):
     # RAG retrieval
     retrieval_top_k: int = 8
 
-    @field_validator("news_api_key", "alpha_vantage_api_key", "groq_api_key", mode="before")
+    @field_validator("news_api_key", "alpha_vantage_api_key", "groq_api_key",
+                     "gemini_api_key", "anthropic_api_key", mode="before")
     @classmethod
     def _strip_placeholders(cls, v: str) -> str:
         """Treat unfilled placeholder values as empty so optional features skip gracefully."""

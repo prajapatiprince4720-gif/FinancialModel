@@ -10,10 +10,16 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+from src.data.company import BANKS, INSURERS, LENDERS, NBFCS, CompanyData, load_company
+from src.data.sectors import sector_of
+from src.utils.stats import log_linear_growth, robust_sd
+from src.valuation.probabilistic import ValueDriverInputs, simulate, verdict_from_probability
 
 _PRICE_CACHE: dict[str, Optional[float]] = {}
 _PRICE_CACHE_FILE = Path("data/raw/nse/live_prices.json")
@@ -22,7 +28,10 @@ _PRICE_CACHE_FILE = Path("data/raw/nse/live_prices.json")
 # Some NSE symbols need alternate yfinance tickers
 _TICKER_OVERRIDES: dict[str, list[str]] = {
     "ZOMATO":     ["ETERNAL.NS"],
-    "TATAMOTORS": ["TATAMOTORS.BO", "TTM"],   # BSE fallback; ADR as last resort
+    # TATAMOTORS deliberately has no fallback: after the 2025 demerger the
+    # traded TMPV price covers passenger vehicles only, while Screener still
+    # reports the combined company — pairing them gave a 1.3x P/E. No price is
+    # better than a wrong one. See CORPORATE_ACTIONS in src/data/company.py.
 }
 
 
@@ -80,10 +89,20 @@ def _fetch_cmp(symbol: str) -> Optional[float]:
     return price
 
 
+def _price_for(cd: CompanyData) -> Optional[float]:
+    """
+    The price to value `cd` against. A historical view uses only the price it
+    carries — falling back to the live quote would pair old fundamentals with
+    today's price — so without one, price-based outputs are left empty.
+    """
+    if cd.is_historical:
+        return cd.current_price
+    return cd.current_price or _fetch_cmp(cd.symbol)
+
+
 # ── India macro constants ──────────────────────────────────────────────────────
 # RF_RATE is fetched live from NSE/yfinance (24h cache) — never hardcoded.
-from src.utils.macro_rates import get_rf_rate as _get_rf_rate
-_RF_RATE  = _get_rf_rate()   # India 10Y GSEC yield (live, refreshed daily)
+from src.utils.macro_rates import RFContext, get_rf_context
 _ERP      = 0.055            # India Equity Risk Premium (Damodaran estimate)
 _TERM_G   = 0.055            # Terminal growth rate (long-run nominal GDP)
 _PROJ_YR  = 10               # Projection horizon
@@ -104,44 +123,28 @@ _SECTOR_BETA: dict[str, float] = {
     "FINSERV":   1.10,
     "CEMENT":    1.15,
     "DEFENSE":   0.90,   # PSU defense; steady order books, low cyclicality
-    "DEFAULT":   1.00,
+    "DEFAULT":   1.00,   # also any sector without its own beta (healthcare, consumer tech)
 }
 
-_SYM_SECTOR: dict[str, str] = {
-    "HDFCBANK": "BANKING", "ICICIBANK": "BANKING", "SBIN": "BANKING",
-    "AXISBANK": "BANKING", "KOTAKBANK": "BANKING", "INDUSINDBK": "BANKING",
-    "TCS": "IT", "INFY": "IT", "HCLTECH": "IT", "WIPRO": "IT", "TECHM": "IT",
-    "HINDUNILVR": "FMCG", "ITC": "FMCG", "NESTLEIND": "FMCG",
-    "BRITANNIA": "FMCG", "TATACONSUM": "FMCG",
-    "SUNPHARMA": "PHARMA", "DRREDDY": "PHARMA", "CIPLA": "PHARMA",
-    "MARUTI": "AUTO", "TATAMOTORS": "AUTO", "M&M": "AUTO",
-    "BAJAJ-AUTO": "AUTO", "EICHERMOT": "AUTO", "HEROMOTOCO": "AUTO",
-    "RELIANCE": "ENERGY", "ONGC": "ENERGY", "BPCL": "ENERGY", "NTPC": "ENERGY",
-    "POWERGRID": "ENERGY", "COALINDIA": "ENERGY",
-    "TATASTEEL": "METALS", "JSWSTEEL": "METALS", "HINDALCO": "METALS",
-    "LT": "INFRA", "ULTRACEMCO": "CEMENT", "GRASIM": "CEMENT",
-    "BHARTIARTL": "TELECOM",
-    "BAJFINANCE": "FINSERV", "BAJAJFINSV": "FINSERV", "SHRIRAMFIN": "FINSERV",
-    "HDFCLIFE": "INSURANCE", "SBILIFE": "INSURANCE",
-    "ADANIENT": "INFRA", "ADANIPORTS": "INFRA",
-    "TITAN": "FMCG", "ASIANPAINT": "FMCG", "BEL": "DEFENSE",
-    "APOLLOHOSP": "DEFAULT", "ZOMATO": "DEFAULT",
-}
+
+def _sector_beta(symbol: str) -> float:
+    return _SECTOR_BETA.get(sector_of(symbol), _SECTOR_BETA["DEFAULT"])
 
 # Symbols routed to Residual Income Model instead of FCF-DCF
-_BANK_SYMBOLS: set[str] = {
-    "HDFCBANK", "ICICIBANK", "AXISBANK", "KOTAKBANK", "SBIN", "INDUSINDBK",
-}
-_NBFC_SYMBOLS: set[str] = {
-    "BAJFINANCE", "SHRIRAMFIN", "BAJAJFINSV",
-}
-_FIN_SECTOR: set[str] = _BANK_SYMBOLS | _NBFC_SYMBOLS
+_BANK_SYMBOLS = BANKS
+_NBFC_SYMBOLS = NBFCS
+_FIN_SECTOR   = LENDERS
 
 # Insurance: P/E relative model — CFO includes policyholder premiums (inflated),
 # so DCF gives nonsensical STRONG BUY (+150%). Sector trades at ~62x trailing P/E.
-_INSURANCE_SYMBOLS: set[str] = {"HDFCLIFE", "SBILIFE"}
+_INSURANCE_SYMBOLS = INSURERS
 _INSURANCE_SECTOR_PE = 62.0   # Indian listed life insurers trailing P/E anchor
 _INSURANCE_PE_SIGMA  = 12.0   # ±1σ P/E band (~50–74x historically observed)
+
+# Conglomerates whose consolidated balance sheet carries a lending subsidiary
+# (L&T Finance, M&M Financial, Aditya Birla Capital). Their borrowings are a lender's funding, not
+# corporate leverage; deducting them understates equity value.
+_HAS_LENDING_ARM: set[str] = {"LT", "M&M", "GRASIM"}   # + Aditya Birla Capital
 
 # Projection horizon for RIM (banks are slow-moving; 15Y better than 10Y)
 _BANK_PROJ_YR = 15
@@ -178,187 +181,207 @@ class DCFResult:
     verdict:          str
     model:            str = "DCF"     # "DCF" or "RIM"
     notes:            list[str] = field(default_factory=list)
+    rf_rate:          float = 0.0     # risk-free rate actually used
+    rf_source:        str   = ""      # where that rate came from
+    rf_is_live:       bool  = False   # False => valuation rests on a stale rate
+    rf_label:         str   = ""      # one-line provenance for report footers
+    # ── Probabilistic outputs (see src/valuation/probabilistic.py) ──
+    # intrinsic_value is the MEDIAN of the simulated distribution; iv_low/iv_high
+    # are P10/P90. prob_undervalued = P(value > price).
+    prob_undervalued: Optional[float] = None
+    iv_p25:           float = 0.0
+    iv_p75:           float = 0.0
+    iv_base:          float = 0.0     # value at central assumptions (no simulation)
+    implied_growth:   Optional[float] = None   # reverse DCF: starting growth priced in
+    implied_status:   str   = ""
+    sensitivities:    dict  = field(default_factory=dict)  # % value change per +1pp
+    terminal_share:   float = 0.0     # share of value from the terminal period
 
 
 class DCFEngine:
-    """Computes intrinsic value per share from cached Screener.in data."""
+    """
+    Computes intrinsic value per share from cached Screener.in data.
 
-    def __init__(self, cache_dir: str = "data/raw/screener"):
+    The risk-free rate is resolved once per engine instance rather than at
+    import time, so a long-running process (the web API) picks up a new rate
+    when the 24 h macro cache rolls over, and importing this module never
+    triggers a network call.
+    """
+
+    def __init__(self, cache_dir: str = "data/raw/screener",
+                 rf_context: RFContext | None = None, quiet: bool = False):
         self.cache_dir = Path(cache_dir)
+        self.rf = rf_context or get_rf_context(quiet=quiet)
+
+    @property
+    def _rf_rate(self) -> float:
+        return self.rf.rate
+
+    def _rf_fields(self) -> dict:
+        """Provenance kwargs stamped onto every DCFResult this engine produces."""
+        return {
+            "rf_rate":    self.rf.rate,
+            "rf_source":  self.rf.source,
+            "rf_is_live": self.rf.is_live,
+            "rf_label":   self.rf.label,
+        }
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def value(self, symbol: str) -> DCFResult:
-        data = self._load(symbol)
-        if data is None:
+    def value(self, symbol: str, as_of: datetime | str | None = None,
+              data: Optional[CompanyData] = None) -> DCFResult:
+        """
+        Value `symbol` from current data, from the snapshot observed at `as_of`,
+        or from an explicit CompanyData (the backtest passes one built with
+        CompanyData.as_of(), carrying the historical price).
+
+        `as_of` pins the fundamentals only; the risk-free rate is whatever this
+        engine was given.
+        """
+        cd = data if data is not None else load_company(symbol, as_of=as_of, cache_dir=self.cache_dir)
+        if cd is None:
             return self._empty(symbol, "No cached data")
 
         if symbol in _INSURANCE_SYMBOLS:
-            return self._insurance_pe_value(symbol, data)
+            return self._insurance_pe_value(symbol, cd)
         if symbol in _FIN_SECTOR:
-            return self._bank_rim_value(symbol, data)
-        return self._dcf_value(symbol, data)
+            return self._bank_rim_value(symbol, cd)
+        return self._dcf_value(symbol, cd)
 
-    # ── FCF-DCF for non-financial companies ───────────────────────────────────
+    # ── Value-driver DCF for non-financial companies ──────────────────────────
 
-    def _dcf_value(self, symbol: str, data: dict) -> DCFResult:
-        pl   = data.get("profit_loss", {})
-        bs   = data.get("balance_sheet", {})
-        cf   = data.get("cash_flow", {})
-        cmp  = data.get("current_price") or _fetch_cmp(symbol)
+    def _dcf_value(self, symbol: str, cd: CompanyData) -> DCFResult:
+        """
+        Probabilistic value-driver DCF (see src/valuation/probabilistic.py).
 
-        years   = pl.get("years", [])
-        pl_rows = pl.get("rows", {})
-        bs_rows = bs.get("rows", {})
-        cf_rows = cf.get("rows", {})
+        Inputs come from the statements, each estimated robustly:
+          NOPAT₀  latest revenue × median 5Y EBIT margin × (1 − tax) — normalised,
+                  so one boom or bust year does not set the base
+          g₀      OLS slope of ln(revenue) over 6 years — uses every year, not
+                  just the endpoints, so a depressed FY21 base cannot inflate it
+          ROIC₀   median 5Y NOPAT / average capital employed; its spread is the
+                  MAD-based robust standard deviation of the same years
 
-        n   = len(years)
-        cut = n - 1 if years and "TTM" in str(years[-1]) else n
+        EBIT (= PBT + interest) includes other income earned on cash and
+        investments, and capital employed (= equity + borrowings) includes that
+        cash. Equity value is therefore EV minus *gross* borrowings — cash is
+        already valued through its income, so it is not added again.
+        """
+        cmp = _price_for(cd)
+        pl, bs = "profit_loss", "balance_sheet"
+        n = len(cd.years(pl))
 
-        def _s(rows: dict, key: str) -> list[float]:
-            return [v for v in rows.get(key, [])[:cut] if v is not None]
+        def fit(vals: list) -> list:
+            vals = vals[-n:] if n else []
+            return [None] * (n - len(vals)) + vals
 
-        fcf_series = _s(cf_rows, "Free Cash Flow")
-        cfo_series = _s(cf_rows, "Cash from Operating Activity")
-        np_series  = _s(pl_rows, "Net Profit")
-        eps_series = _s(pl_rows, "EPS in Rs")
-        sales_ser  = _s(pl_rows, "Sales")
-        interest   = _s(pl_rows, "Interest")
-        tax_series = _s(pl_rows, "Tax %")
-        # Fix: banks use "Borrowing" singular; non-banks use "Borrowings"
-        borr_ser   = _s(bs_rows, "Borrowings") or _s(bs_rows, "Borrowing")
-        eq_cap     = _s(bs_rows, "Equity Capital")
-        reserves   = _s(bs_rows, "Reserves")
+        sales    = fit(cd.aligned(pl, "Sales", "Revenue"))
+        pbt      = fit(cd.aligned(pl, "Profit before tax"))
+        interest = fit(cd.aligned(pl, "Interest"))
+        tax_pct  = fit(cd.aligned(pl, "Tax %"))
+        eq_cap   = fit(cd.aligned(bs, "Equity Capital"))
+        reserves = fit(cd.aligned(bs, "Reserves"))
+        borrow   = fit(cd.aligned(bs, "Borrowings", "Borrowing"))
+        np_series  = cd.series(pl, "Net Profit")
+        eps_series = cd.series(pl, "EPS in Rs")
 
         notes: list[str] = []
-
         shares_cr = self._shares(np_series, eps_series)
         if shares_cr <= 0:
             return self._empty(symbol, "Cannot determine share count")
 
-        beta        = _SECTOR_BETA.get(_SYM_SECTOR.get(symbol, "DEFAULT"), 1.0)
-        cost_equity = _RF_RATE + beta * _ERP
+        def ok(*xs) -> bool:
+            return all(x is not None and np.isfinite(x) for x in xs)
 
-        avg_borr = self._tail_avg(borr_ser, 3)
-        avg_int  = self._tail_avg(interest, 3)
-        if avg_borr > 0 and avg_int > 0:
-            cost_debt = max(0.05, min(avg_int / avg_borr, 0.20))
+        def tax_rate(pct) -> float:
+            return min(max((pct if ok(pct) else 25.17) / 100, 0.0), 0.35)
+
+        ebit = [p + (i or 0) if ok(p) else None for p, i in zip(pbt, interest)]
+        cap  = [e + r + (b or 0) if ok(e, r) else None
+                for e, r, b in zip(eq_cap, reserves, borrow)]
+
+        roic_hist = [
+            ebit[t] * (1 - tax_rate(tax_pct[t])) / ((cap[t] + cap[t - 1]) / 2)
+            for t in range(1, n)
+            if ok(ebit[t], cap[t], cap[t - 1]) and cap[t] + cap[t - 1] > 0
+        ][-5:]
+        margins = [e / s for e, s in zip(ebit[-5:], sales[-5:]) if ok(e, s) and s > 0]
+        if len(roic_hist) < 3 or len(margins) < 3 or not ok(sales[-1]):
+            return self._empty(symbol, "Insufficient operating history for value-driver model")
+
+        tax0   = tax_rate(float(np.median([t for t in tax_pct[-3:] if ok(t)] or [25.17])))
+        nopat0 = sales[-1] * float(np.median(margins)) * (1 - tax0)
+        if nopat0 <= 0:
+            return self._empty(
+                symbol, "Not consistently profitable — normalised operating profit is negative, "
+                        "so an earnings-based valuation is not meaningful")
+
+        roic0   = float(np.median(roic_hist))
+        roic_sd = max(robust_sd(roic_hist) or 0.0, 0.01)
+        g0      = log_linear_growth(sales)
+        if g0 is None:
+            g0 = 0.07
+            notes.append("Revenue history too short for a growth fit — using 7%")
+        g0 = max(-0.05, min(g0, 0.25))
+
+        # ── Discount rate: market-weight WACC ────────────────────────────────
+        beta        = _sector_beta(symbol)
+        debt_cr     = borrow[-1] if ok(borrow[-1]) else 0.0
+        int_3y      = [i for i in interest[-3:] if ok(i)]
+        borr_3y     = [b for b in borrow[-3:] if ok(b)]
+        if borr_3y and int_3y and np.mean(borr_3y) > 0 and np.mean(int_3y) > 0:
+            cost_debt = min(max(np.mean(int_3y) / np.mean(borr_3y), 0.05), 0.20)
         else:
             cost_debt = 0.085
-
-        avg_tax = self._tail_avg(tax_series, 3) / 100 if tax_series else 0.25
-        avg_tax = max(0.0, min(avg_tax, 0.40))
-
-        # Market-cap equity weights (academically correct; book equity understates
-        # equity weight for high P/B companies, making WACC artificially low).
-        total_debt_cr = borr_ser[-1] if borr_ser else 0
-        if cmp and cmp > 0 and shares_cr > 0:
-            market_equity_cr = shares_cr * cmp      # Cr shares × ₹/share = ₹ Cr
+        if cmp and cmp > 0:
+            mkt_eq = shares_cr * cmp
         else:
-            # Fallback to book equity when CMP unavailable
-            market_equity_cr = (eq_cap[-1] + reserves[-1]) if eq_cap and reserves else 0
+            mkt_eq = (eq_cap[-1] or 0) + (reserves[-1] or 0)
             notes.append("WACC uses book equity (no CMP available)")
-        total_v = market_equity_cr + total_debt_cr
-        we = market_equity_cr / total_v if total_v > 0 else 0.70
-        wd = total_debt_cr   / total_v if total_v > 0 else 0.30
+        total = mkt_eq + debt_cr
+        we, wd = (mkt_eq / total, debt_cr / total) if total > 0 else (0.7, 0.3)
 
-        wacc = we * cost_equity + wd * cost_debt * (1 - avg_tax)
-        wacc = max(0.08, min(wacc, 0.20))
+        if symbol in _HAS_LENDING_ARM:
+            notes.append(
+                "Consolidated statements include a lending subsidiary whose borrowings are "
+                "deducted as corporate debt — a sum-of-the-parts valuation is needed")
 
-        use_series = fcf_series if fcf_series else cfo_series
-        tail       = use_series[-5:] if len(use_series) >= 5 else use_series
-        if sum(1 for v in tail if v > 0) < 2:
-            use_series = cfo_series if cfo_series else []
-            notes.append("FCF erratic — using CFO as proxy")
-
-        # Earnings-proxy fallback: inventory-cycle brands (TITAN), growth platforms
-        # (ZOMATO), and capex-heavy stocks have chronically negative FCF/CFO.
-        # Treat Net Profit as the cash earnings base instead of distorted cash flows.
-        # NP is post-interest (equity return), so we must NOT deduct debt again later.
-        using_np_proxy = False
-        if np_series:
-            cf_tail  = use_series[-5:] if len(use_series) >= 5 else use_series
-            neg_rate = (sum(1 for v in cf_tail if v is not None and v <= 0)
-                        / max(len(cf_tail), 1))
-            if neg_rate >= 0.35:
-                np_pos = [v for v in np_series[-5:] if v and v > 0]
-                if np_pos:
-                    use_series   = np_series
-                    using_np_proxy = True
-                    notes.append(
-                        "FCF/CFO erratic — using Net Profit as equity earnings proxy (debt not re-deducted)"
-                    )
-
-        if len(use_series) < 2:
-            return self._empty(symbol, "Insufficient FCF/CFO history")
-
-        recent_pos = [v for v in use_series[-5:] if v and v > 0]
-        older_pos  = [v for v in use_series[-8:-3] if v and v > 0]
-        if recent_pos and older_pos:
-            avg_recent = sum(recent_pos) / len(recent_pos)
-            avg_older  = sum(older_pos)  / len(older_pos)
-            if avg_older > 0 and avg_recent > 0:
-                fcf_cagr = (avg_recent / avg_older) ** (1 / 4) - 1
-            else:
-                fcf_cagr = 0.07
-        else:
-            fcf_cagr = self._cagr(use_series[-6:])
-        fcf_cagr = max(-0.03, min(fcf_cagr, 0.25))
-
-        pos_vals = [v for v in use_series[-5:] if v and v > 0]
-        base_fcf = sum(pos_vals) / len(pos_vals) if pos_vals else 0.0
-        if base_fcf <= 0:
-            return self._empty(symbol, "No positive FCF/CFO baseline")
-
-        # NP-proxy DCF is already an equity model (post-interest) — don't double-deduct debt.
-        # FCF/CFO DCF is an enterprise model — subtract net debt to get equity value.
-        net_debt_cr = 0.0 if using_np_proxy else max(0.0, total_debt_cr * 0.85)
-
-        pv_fcf, pv_tv = self._dcf_calc(base_fcf, fcf_cagr, wacc, _TERM_G, _PROJ_YR)
-        total_iv_cr   = pv_fcf + pv_tv
-        equity_iv_cr  = total_iv_cr - net_debt_cr
-
-        ev_mode = False
-        if equity_iv_cr <= 0:
-            equity_iv_cr = total_iv_cr
-            ev_mode = True
-            notes.append("EV basis — total debt exceeds DCF value (capex-heavy cycle)")
-
-        iv_per_share = equity_iv_cr / shares_cr
-
-        rng       = np.random.default_rng(42)
-        g_samples = rng.normal(fcf_cagr, 0.04, _MC_SIMS).clip(-0.06, 0.30)
-        w_samples = rng.normal(wacc,     0.015, _MC_SIMS).clip(0.07, 0.22)
-
-        mc_ivs = []
-        for g, w in zip(g_samples, w_samples):
-            if w <= _TERM_G:
-                continue
-            pf, pt = self._dcf_calc(base_fcf, g, w, _TERM_G, _PROJ_YR)
-            eq_iv  = (pf + pt) - net_debt_cr
-            if ev_mode or eq_iv <= 0:
-                eq_iv = pf + pt
-            mc_ivs.append(eq_iv / shares_cr)
-
-        mc_arr  = np.array(mc_ivs)
-        iv_low  = float(np.percentile(mc_arr, 10))
-        iv_high = float(np.percentile(mc_arr, 90))
-
-        mos = (iv_per_share - cmp) / cmp if cmp and cmp > 0 and iv_per_share > 0 else None
+        inputs = ValueDriverInputs(
+            nopat0=nopat0, g0=g0, roic0=roic0, roic_sd=roic_sd,
+            rf=self._rf_rate, beta=beta, erp=_ERP, shares=shares_cr, debt=debt_cr,
+            w_equity=we, w_debt=wd, kd_after_tax=cost_debt * (1 - tax0),
+            g_inf=_TERM_G, horizon=_PROJ_YR,
+        )
+        pv = simulate(inputs, cmp)
+        notes.append(
+            f"Value-driver model | NOPAT₀ ₹{nopat0:,.0f} Cr  ROIC {roic0:.1%} (±{roic_sd:.1%})  "
+            f"g₀ {g0:.1%} → {_TERM_G:.1%}  WACC {pv.discount_rate:.1%}"
+        )
+        if pv.zero_equity_share > 0.10:
+            notes.append(f"Debt exceeds enterprise value in {pv.zero_equity_share:.0%} of scenarios")
 
         return DCFResult(
             symbol=symbol, cmp=cmp,
-            intrinsic_value=round(iv_per_share, 2),
-            iv_low=round(iv_low, 2), iv_high=round(iv_high, 2),
-            margin_of_safety=mos, wacc=wacc, fcf_cagr=fcf_cagr,
-            terminal_value=round(pv_tv, 2), pv_fcf=round(pv_fcf, 2),
-            shares_cr=shares_cr, verdict=self._verdict(mos, iv_per_share),
-            model="DCF", notes=notes,
+            intrinsic_value=round(pv.median, 2),
+            iv_low=round(pv.p10, 2), iv_high=round(pv.p90, 2),
+            margin_of_safety=(pv.median - cmp) / cmp if cmp and cmp > 0 else None,
+            wacc=pv.discount_rate, fcf_cagr=g0,
+            terminal_value=round(pv.pv_terminal, 2), pv_fcf=round(pv.pv_explicit, 2),
+            shares_cr=shares_cr,
+            # A zero median here is a result (debt exceeds value in most
+            # scenarios), not missing data, so the verdict comes from P alone.
+            verdict=verdict_from_probability(pv.prob_undervalued),
+            model="DCF", notes=notes, **self._rf_fields(),
+            prob_undervalued=pv.prob_undervalued,
+            iv_p25=round(pv.p25, 2), iv_p75=round(pv.p75, 2), iv_base=round(pv.base_case, 2),
+            implied_growth=pv.implied.g0 if pv.implied else None,
+            implied_status=pv.implied.status if pv.implied else "",
+            sensitivities=pv.sensitivities, terminal_share=pv.terminal_share,
         )
 
     # ── P/E relative model for listed life insurers ───────────────────────────
 
-    def _insurance_pe_value(self, symbol: str, data: dict) -> DCFResult:
+    def _insurance_pe_value(self, symbol: str, cd: CompanyData) -> DCFResult:
         """
         IV = 3Y-avg EPS × sector P/E anchor (62x for Indian life insurers).
 
@@ -366,20 +389,10 @@ class DCFEngine:
         that are not free cash to equity — DCF overstates IV by 150%+.
         P/E vs sector peers gives a grounded relative valuation.
         """
-        pl   = data.get("profit_loss", {})
-        cmp  = data.get("current_price") or _fetch_cmp(symbol)
+        cmp  = _price_for(cd)
 
-        years   = pl.get("years", [])
-        pl_rows = pl.get("rows", {})
-
-        n   = len(years)
-        cut = n - 1 if years and "TTM" in str(years[-1]) else n
-
-        def _s(rows: dict, key: str) -> list[float]:
-            return [v for v in rows.get(key, [])[:cut] if v is not None]
-
-        np_series  = _s(pl_rows, "Net Profit")
-        eps_series = _s(pl_rows, "EPS in Rs")
+        np_series  = cd.series("profit_loss", "Net Profit")
+        eps_series = cd.series("profit_loss", "EPS in Rs")
         notes: list[str] = []
 
         shares_cr = self._shares(np_series, eps_series)
@@ -398,12 +411,9 @@ class DCFEngine:
         eps_draws = rng.normal(avg_eps, avg_eps * 0.10, _MC_SIMS).clip(avg_eps * 0.5, avg_eps * 2.0)
         mc_arr    = pe_draws * eps_draws
 
-        iv_low  = float(np.percentile(mc_arr, 10))
-        iv_high = float(np.percentile(mc_arr, 90))
-
-        mos  = (iv_per_share - cmp) / cmp if cmp and cmp > 0 else None
+        dist = self._distribution(mc_arr, cmp)
         beta = _SECTOR_BETA.get("INSURANCE", 0.85)
-        coe  = _RF_RATE + beta * _ERP
+        coe  = self._rf_rate + beta * _ERP
 
         notes.append(
             f"P/E Relative model  |  3Y-avg EPS=₹{avg_eps:.1f}  "
@@ -412,20 +422,26 @@ class DCFEngine:
 
         return DCFResult(
             symbol=symbol, cmp=cmp,
-            intrinsic_value=round(iv_per_share, 2),
-            iv_low=round(iv_low, 2), iv_high=round(iv_high, 2),
-            margin_of_safety=mos, wacc=coe,
+            intrinsic_value=round(dist["median"], 2),
+            iv_low=round(dist["p10"], 2), iv_high=round(dist["p90"], 2),
+            margin_of_safety=(dist["median"] - cmp) / cmp if cmp and cmp > 0 else None,
+            wacc=coe,
             fcf_cagr=avg_eps,
             terminal_value=0.0,
             pv_fcf=round(iv_per_share, 2),
             shares_cr=shares_cr,
-            verdict=self._verdict(mos, iv_per_share),
-            model="PE", notes=notes,
+            verdict=self._prob_verdict(dist["prob"], dist["median"]),
+            model="PE", notes=notes, **self._rf_fields(),
+            prob_undervalued=dist["prob"],
+            iv_p25=round(dist["p25"], 2), iv_p75=round(dist["p75"], 2),
+            iv_base=round(iv_per_share, 2),
+            # Value is linear in the multiple: +1x P/E → +1/62 of value.
+            sensitivities={"sector_pe_plus_1x": 100 / _INSURANCE_SECTOR_PE},
         )
 
     # ── Residual Income Model for banks & NBFCs ───────────────────────────────
 
-    def _bank_rim_value(self, symbol: str, data: dict) -> DCFResult:
+    def _bank_rim_value(self, symbol: str, cd: CompanyData) -> DCFResult:
         """
         IV = BV₀ + Σ [(ROE_t − CoE) × BV_{t-1}] / (1+CoE)^t  +  TV / (1+CoE)^10
 
@@ -433,28 +449,14 @@ class DCFEngine:
         BV grows each year by retained earnings: BV_t = BV_{t-1} × (1 + ROE_t × retention).
         Monte Carlo: draws on ROE₀ and CoE to produce P10/P90 bands.
         """
-        pl   = data.get("profit_loss", {})
-        bs   = data.get("balance_sheet", {})
-        rat  = data.get("ratios", {})
-        cmp  = data.get("current_price") or _fetch_cmp(symbol)
+        cmp  = _price_for(cd)
 
-        years   = pl.get("years", [])
-        pl_rows = pl.get("rows", {})
-        bs_rows = bs.get("rows", {})
-        rat_rows = rat.get("rows", {})
-
-        n   = len(years)
-        cut = n - 1 if years and "TTM" in str(years[-1]) else n
-
-        def _s(rows: dict, key: str) -> list[float]:
-            return [v for v in rows.get(key, [])[:cut] if v is not None]
-
-        np_series  = _s(pl_rows, "Net Profit")
-        eps_series = _s(pl_rows, "EPS in Rs")
-        eq_cap     = _s(bs_rows, "Equity Capital")
-        reserves   = _s(bs_rows, "Reserves")
-        roe_series = _s(rat_rows, "ROE %")
-        div_payout = _s(pl_rows, "Dividend Payout %")
+        np_series  = cd.series("profit_loss", "Net Profit")
+        eps_series = cd.series("profit_loss", "EPS in Rs")
+        eq_cap     = cd.series("balance_sheet", "Equity Capital")
+        reserves   = cd.series("balance_sheet", "Reserves")
+        roe_series = cd.series("ratios", "ROE %")
+        div_payout = cd.series("profit_loss", "Dividend Payout %")
 
         notes: list[str] = []
 
@@ -479,8 +481,8 @@ class DCFEngine:
         roe0 = max(0.05, min(roe0, 0.35))
 
         # Cost of Equity
-        beta = _SECTOR_BETA.get(_SYM_SECTOR.get(symbol, "DEFAULT"), 1.0)
-        coe  = _RF_RATE + beta * _ERP
+        beta = _sector_beta(symbol)
+        coe  = self._rf_rate + beta * _ERP
 
         # Retention ratio (1 - payout)
         avg_payout = self._tail_avg(div_payout, 3) / 100 if div_payout else 0.25
@@ -492,14 +494,24 @@ class DCFEngine:
         proj_yr = _BANK_PROJ_YR  # 15Y horizon — banks are slow-mean-reverting
 
         # ── Base-case RIM ─────────────────────────────────────────────────────
-        pv_ri, bv_n = self._rim_calc(bv0, roe0, roe_term, coe, retention, proj_yr)
+        def rim(coe_: float, roe_term_: float) -> tuple[float, float, float]:
+            pv_ri_, bv_n_ = self._rim_calc(bv0, roe0, roe_term_, coe_, retention, proj_yr)
+            ri_term_ = (roe_term_ - coe_) * bv_n_
+            pv_tv_ = 0.0
+            if coe_ > _TERM_G and ri_term_ > 0:
+                pv_tv_ = (ri_term_ / (coe_ - _TERM_G)) / (1 + coe_) ** proj_yr
+            return bv0 + pv_ri_ + pv_tv_, pv_ri_, pv_tv_
 
-        ri_term = (roe_term - coe) * bv_n
-        pv_tv   = 0.0
-        if coe > _TERM_G and ri_term > 0:
-            pv_tv = (ri_term / (coe - _TERM_G)) / (1 + coe) ** proj_yr
+        iv_per_share, pv_ri, pv_tv = rim(coe, roe_term)
 
-        iv_per_share = bv0 + pv_ri + pv_tv
+        # Sensitivities by central difference: % value change per +1pp.
+        h = 1e-4
+        sens = {}
+        if iv_per_share > 0:
+            d_coe = (rim(coe + h, roe_term)[0] - rim(coe - h, roe_term)[0]) / (2 * h)
+            d_roe = (rim(coe, roe_term + h)[0] - rim(coe, roe_term - h)[0]) / (2 * h)
+            sens = {"discount_rate":  d_coe * 0.01 / iv_per_share * 100,
+                    "long_run_roe":   d_roe * 0.01 / iv_per_share * 100}
 
         # ── Vectorised Monte Carlo ────────────────────────────────────────────
         rng         = np.random.default_rng(42)
@@ -528,11 +540,8 @@ class DCFEngine:
             0.0,
         )
 
-        mc_arr  = bv0 + pv_ri_mc + pv_tv_mc
-        iv_low  = float(np.percentile(mc_arr, 10))
-        iv_high = float(np.percentile(mc_arr, 90))
-
-        mos = (iv_per_share - cmp) / cmp if cmp and cmp > 0 and iv_per_share > 0 else None
+        mc_arr = bv0 + pv_ri_mc + pv_tv_mc
+        dist   = self._distribution(mc_arr, cmp)
 
         notes.append(
             f"Residual Income Model  |  ROE={roe0:.1%}  CoE={coe:.1%}  "
@@ -541,15 +550,20 @@ class DCFEngine:
 
         return DCFResult(
             symbol=symbol, cmp=cmp,
-            intrinsic_value=round(iv_per_share, 2),
-            iv_low=round(iv_low, 2), iv_high=round(iv_high, 2),
-            margin_of_safety=mos, wacc=coe,
+            intrinsic_value=round(dist["median"], 2),
+            iv_low=round(dist["p10"], 2), iv_high=round(dist["p90"], 2),
+            margin_of_safety=(dist["median"] - cmp) / cmp if cmp and cmp > 0 else None,
+            wacc=coe,
             fcf_cagr=roe0,
             terminal_value=round(pv_tv, 2),
             pv_fcf=round(pv_ri, 2),
             shares_cr=shares_cr,
-            verdict=self._verdict(mos, iv_per_share),
-            model="RIM", notes=notes,
+            verdict=self._prob_verdict(dist["prob"], dist["median"]),
+            model="RIM", notes=notes, **self._rf_fields(),
+            prob_undervalued=dist["prob"],
+            iv_p25=round(dist["p25"], 2), iv_p75=round(dist["p75"], 2),
+            iv_base=round(iv_per_share, 2), sensitivities=sens,
+            terminal_share=pv_tv / iv_per_share if iv_per_share > 0 else 0.0,
         )
 
     # ── Shared calculation helpers ────────────────────────────────────────────
@@ -599,21 +613,18 @@ class DCFEngine:
         return (end / start) ** (1 / n) - 1
 
     def _shares(self, np_series: list[float], eps_series: list[float]) -> float:
+        """
+        Current share count (Cr) implied by the latest year's NP / EPS.
+
+        Only the latest year is used, so pre-IPO share counts (ZOMATO) never
+        enter. A former "pre-IPO guard" here trimmed earlier years on any >20x EPS
+        jump — which an ordinary loss year also triggers (BHARTIARTL 0.74 → −55) —
+        and, because it shortened the list it was iterating, raised IndexError.
+        """
         if not np_series or not eps_series:
             return 0.0
-
-        # Pre-IPO guard: detect massive EPS discontinuity (e.g. ZOMATO went from
-        # −₹70,000 EPS → −₹10 after IPO when share count multiplied ~10,000×).
-        # Only compute share count from post-discontinuity values.
-        clean_np, clean_eps = list(np_series), list(eps_series)
-        for i in range(len(clean_eps) - 1):
-            a, b = clean_eps[i], clean_eps[i + 1]
-            if a and b and abs(a) > 0 and abs(b / a) > 20:
-                clean_np  = np_series[i + 1:]
-                clean_eps = eps_series[i + 1:]
-
-        np_cr, eps_rs = clean_np[-1], clean_eps[-1]
-        if not eps_rs or eps_rs == 0:
+        np_cr, eps_rs = np_series[-1], eps_series[-1]
+        if not eps_rs:
             return 0.0
         return np_cr / eps_rs
 
@@ -622,21 +633,28 @@ class DCFEngine:
         vals = [v for v in tail if v is not None]
         return sum(vals) / len(vals) if vals else 0.0
 
-    def _load(self, symbol: str) -> Optional[dict]:
-        path = self.cache_dir / f"{symbol}.json"
-        if not path.exists():
-            return None
-        with open(path) as f:
-            return json.load(f)
-
     def _empty(self, symbol: str, reason: str) -> DCFResult:
         return DCFResult(
             symbol=symbol, cmp=None, intrinsic_value=0.0,
             iv_low=0.0, iv_high=0.0, margin_of_safety=None,
             wacc=0.0, fcf_cagr=0.0, terminal_value=0.0,
             pv_fcf=0.0, shares_cr=0.0, verdict="INSUFFICIENT_DATA",
-            model="N/A", notes=[reason],
+            model="N/A", notes=[reason], **self._rf_fields(),
         )
+
+    @staticmethod
+    def _prob_verdict(prob: Optional[float], iv: float) -> str:
+        if iv <= 0:
+            return "INSUFFICIENT_DATA"
+        return verdict_from_probability(prob)
+
+    @staticmethod
+    def _distribution(mc_arr: np.ndarray, cmp: Optional[float]) -> dict:
+        """Median, quartiles, P10/P90 and P(value > price) from simulated values."""
+        p10, p25, p50, p75, p90 = np.percentile(mc_arr, [10, 25, 50, 75, 90])
+        prob = float(np.mean(mc_arr > cmp)) if cmp and cmp > 0 else None
+        return {"median": float(p50), "p10": float(p10), "p25": float(p25),
+                "p75": float(p75), "p90": float(p90), "prob": prob}
 
     def _verdict(self, mos: Optional[float], iv: float) -> str:
         if iv <= 0:

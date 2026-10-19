@@ -22,8 +22,8 @@ from typing import Optional
 import numpy as np
 
 
-from src.utils.macro_rates import get_rf_rate as _get_rf_rate
-_RF_RATE      = _get_rf_rate()   # India 10Y GSEC yield (live, 24h cache)
+from src.data.sectors import SECTOR
+from src.utils.macro_rates import RFContext, get_rf_context
 _N_PORT       = 10_000     # Monte Carlo portfolios (doubled for better coverage)
 _MIN_W        = 0.04       # min weight per stock (4%)
 _MAX_W        = 0.35       # max weight per stock (35%)
@@ -31,28 +31,9 @@ _MAX_SEC_W    = 0.40       # max sector weight (40%) — prevents sector bets
 _TRADING_DAYS = 252
 
 
-# ── Sector assignments (mirrors DCF engine) ───────────────────────────────────
+# ── Sector assignments (shared with the DCF engine) ───────────────────────────
 
-_SYM_SECTOR: dict[str, str] = {
-    "HDFCBANK": "BANKING",  "ICICIBANK": "BANKING",  "SBIN": "BANKING",
-    "AXISBANK": "BANKING",  "KOTAKBANK": "BANKING",  "INDUSINDBK": "BANKING",
-    "TCS": "IT",  "INFY": "IT",  "HCLTECH": "IT",  "WIPRO": "IT",  "TECHM": "IT",
-    "HINDUNILVR": "FMCG",  "ITC": "FMCG",  "NESTLEIND": "FMCG",
-    "BRITANNIA": "FMCG",   "TATACONSUM": "FMCG",
-    "TITAN": "FMCG",       "ASIANPAINT": "FMCG",
-    "SUNPHARMA": "PHARMA", "DRREDDY": "PHARMA",  "CIPLA": "PHARMA",
-    "MARUTI": "AUTO",  "TATAMOTORS": "AUTO",  "M&M": "AUTO",
-    "BAJAJ-AUTO": "AUTO",  "EICHERMOT": "AUTO",  "HEROMOTOCO": "AUTO",
-    "RELIANCE": "ENERGY",  "ONGC": "ENERGY",  "BPCL": "ENERGY",
-    "NTPC": "ENERGY",      "POWERGRID": "ENERGY",  "COALINDIA": "ENERGY",
-    "TATASTEEL": "METALS", "JSWSTEEL": "METALS",  "HINDALCO": "METALS",
-    "LT": "INFRA",  "ADANIENT": "INFRA",  "ADANIPORTS": "INFRA",  "BEL": "DEFENSE",
-    "ULTRACEMCO": "CEMENT",  "GRASIM": "CEMENT",
-    "BHARTIARTL": "TELECOM",
-    "BAJFINANCE": "FINSERV",  "BAJAJFINSV": "FINSERV",  "SHRIRAMFIN": "FINSERV",
-    "HDFCLIFE": "INSURANCE",  "SBILIFE": "INSURANCE",
-    "APOLLOHOSP": "HEALTHCARE",  "ZOMATO": "CONSUMER_TECH",
-}
+_SYM_SECTOR = SECTOR
 
 # Clusters of related sectors — within-cluster ρ raised to 0.45
 _SECTOR_CLUSTERS: list[set[str]] = [
@@ -120,8 +101,12 @@ class PortfolioOptimizer:
     Uses sector-based correlation matrix and sector concentration cap.
     """
 
-    def __init__(self, cache_dir: str = "data/raw/screener"):
+    def __init__(self, cache_dir: str = "data/raw/screener",
+                 rf_context: RFContext | None = None, quiet: bool = False):
         self.cache_dir = Path(cache_dir)
+        # Resolved per instance, not at import: a long-running web process must
+        # pick up a new rate when the 24 h macro cache rolls over.
+        self.rf = rf_context or get_rf_context(quiet=quiet)
 
     def optimize(
         self,
@@ -192,7 +177,7 @@ class PortfolioOptimizer:
             port_ret = float(mu @ w)
             port_var = float(w @ cov @ w)
             port_vol = float(np.sqrt(max(port_var, 0)))
-            sharpe   = (port_ret - _RF_RATE) / port_vol if port_vol > 0 else 0
+            sharpe   = (port_ret - self.rf.rate) / port_vol if port_vol > 0 else 0
 
             if sharpe > best_sharpe:
                 best_sharpe = sharpe
@@ -201,7 +186,7 @@ class PortfolioOptimizer:
         # ── Build output ─────────────────────────────────────────────────────
         port_ret = float(mu @ best_w)
         port_vol = float(np.sqrt(best_w @ cov @ best_w))
-        sharpe   = (port_ret - _RF_RATE) / port_vol if port_vol > 0 else 0
+        sharpe   = (port_ret - self.rf.rate) / port_vol if port_vol > 0 else 0
         mdd_est  = min(port_vol * 2.0, 0.60)
 
         allocs = []
@@ -305,8 +290,8 @@ class PortfolioOptimizer:
 
         # Volatility: sector-beta scaled, quality-adjusted.
         # Floor at 14%: no Nifty 50 stock has realised annual vol below that.
-        from src.valuation.dcf_engine import _SECTOR_BETA, _SYM_SECTOR as _SM
-        beta     = _SECTOR_BETA.get(_SM.get(symbol, "DEFAULT"), 1.0)
+        from src.valuation.dcf_engine import _sector_beta
+        beta     = _sector_beta(symbol)
         base_vol = 0.22 * beta                    # empirical Nifty 50 avg vol ~22%
         qual_adj = 1.0 - (score / 100) * 0.20    # quality reduces vol by up to 20%
         vol      = max(0.14, min(base_vol * qual_adj, 0.55))

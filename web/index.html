@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="AI-assisted equity research for Nifty 50 companies. Educational use only, not investment advice.">
+  <title>EquityLens — Nifty 50 Equity Research</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead__brand">
+    <span class="masthead__name">EquityLens</span>
+    <span class="masthead__tag">Nifty 50 Research</span>
+  </div>
+  <div class="masthead__spacer"></div>
+  <div class="masthead__macro" id="macroStrip">
+    <span class="muted" style="color:#cfd8e6">Loading market data…</span>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <div id="globalBanner"></div>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button class="tab" role="tab" id="tab-research"    aria-selected="true"  aria-controls="panel-research">Company research</button>
+    <button class="tab" role="tab" id="tab-leaderboard" aria-selected="false" aria-controls="panel-leaderboard">Rankings</button>
+    <button class="tab" role="tab" id="tab-ask"         aria-selected="false" aria-controls="panel-ask">Ask a question</button>
+    <button class="tab" role="tab" id="tab-coverage"    aria-selected="false" aria-controls="panel-coverage">Coverage</button>
+  </nav>
+
+  <!-- ── Company research ────────────────────────────────────────────────── -->
+  <section class="panel" id="panel-research" role="tabpanel" aria-labelledby="tab-research">
+    <div class="toolbar">
+      <div class="field input--grow">
+        <label class="muted" for="stockPicker">Company</label>
+        <select class="select input--grow" id="stockPicker" aria-label="Choose a company">
+          <option value="">Loading companies…</option>
+        </select>
+      </div>
+      <button class="btn" id="loadReportBtn" type="button">Generate research</button>
+      <button class="btn btn--ghost" id="thesisBtn" type="button" disabled>Add AI thesis</button>
+      <button class="btn btn--ghost" id="pdfBtn"  type="button" disabled>Download PDF</button>
+      <button class="btn btn--ghost" id="docxBtn" type="button" disabled>Download Word</button>
+    </div>
+
+    <div id="reportArea">
+      <p class="muted">Pick a company and select <strong>Generate research</strong> to value it from
+      live market prices and cached fundamentals.</p>
+    </div>
+  </section>
+
+  <!-- ── Leaderboard ─────────────────────────────────────────────────────── -->
+  <section class="panel" id="panel-leaderboard" role="tabpanel" aria-labelledby="tab-leaderboard" hidden>
+    <div class="toolbar">
+      <input class="input input--grow" id="lbFilter" type="search"
+             placeholder="Filter by company, symbol or sector" aria-label="Filter rankings">
+      <button class="btn btn--ghost btn--sm" id="lbRefresh" type="button">Refresh</button>
+    </div>
+    <div class="card">
+      <div class="card__head">
+        <span class="card__title">Composite quality ranking</span>
+        <span class="card__note">Percentile-ranked across all 50 companies. Select a row to open its research.</span>
+      </div>
+      <div class="table-scroll">
+        <table id="lbTable">
+          <thead>
+            <tr>
+              <th>Company</th><th>Sector</th><th>Score</th><th>Grade</th>
+              <th>Quality</th><th>Growth</th><th>Piotroski</th>
+              <th>Rev CAGR 3Y</th><th>EPS CAGR 3Y</th><th>D/E</th>
+            </tr>
+          </thead>
+          <tbody><tr><td colspan="10" class="center muted">Loading rankings…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Ask ─────────────────────────────────────────────────────────────── -->
+  <section class="panel" id="panel-ask" role="tabpanel" aria-labelledby="tab-ask" hidden>
+    <div class="card">
+      <div class="card__head">
+        <span class="card__title">Ask the knowledge base</span>
+        <span class="card__note">Grounded in the trained Q&amp;A and cached financials for the chosen company.</span>
+      </div>
+      <div class="toolbar">
+        <select class="select" id="askSymbol" aria-label="Scope the question to a company">
+          <option value="">Any company / general finance</option>
+        </select>
+      </div>
+      <div class="toolbar">
+        <input class="input input--grow" id="askInput" type="text"
+               placeholder="e.g. Is HDFC Bank's valuation fair right now?"
+               aria-label="Your question">
+        <button class="btn" id="askBtn" type="button">Ask</button>
+      </div>
+      <div id="askArea"></div>
+    </div>
+
+    <div class="card" id="faqCard" hidden>
+      <div class="card__head">
+        <span class="card__title">Pre-answered questions</span>
+        <span class="card__note" id="faqNote"></span>
+      </div>
+      <input class="input" id="faqFilter" type="search" style="width:100%;margin-bottom:10px"
+             placeholder="Search the pre-answered questions" aria-label="Search pre-answered questions">
+      <div class="qa" id="faqList"></div>
+    </div>
+  </section>
+
+  <!-- ── Coverage ────────────────────────────────────────────────────────── -->
+  <section class="panel" id="panel-coverage" role="tabpanel" aria-labelledby="tab-coverage" hidden>
+    <div class="card">
+      <div class="card__head">
+        <span class="card__title">Knowledge base coverage</span>
+        <span class="card__note">How much of the investor question bank is answered per company.</span>
+      </div>
+      <div id="coverageSummary"><p class="muted">Loading coverage…</p></div>
+      <div class="table-scroll" style="margin-top:12px">
+        <table id="coverageTable">
+          <thead><tr><th>Company</th><th>Answered</th><th>Of</th><th>Coverage</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card__head">
+        <span class="card__title">Data freshness</span>
+        <span class="card__note">Valuations are only as current as the fundamentals behind them.</span>
+      </div>
+      <div id="healthArea"><p class="muted">Loading…</p></div>
+    </div>
+  </section>
+
+  <p class="disclaimer" id="disclaimerText"></p>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,183 @@
+"""
+Tests for the data layer: snapshot history and the shared company loader.
+Offline; every test uses a temporary database and synthetic payloads.
+Run with: pytest tests/test_data.py -v
+"""
+import json
+from datetime import date, datetime, timezone
+
+import pytest
+
+from src.data.company import CompanyData, _full_year_cut, fiscal_year_available_date, load_company
+from src.data.snapshots import SnapshotStore, backfill_from_cache, content_hash
+
+
+def _payload(np_values, price=100.0):
+    years = ["Mar 2022", "Mar 2023", "Mar 2024", "TTM"]
+    return {
+        "current_price": price,
+        "profit_loss": {"years": years, "rows": {"Net Profit": np_values, "EPS in Rs": [1, 2, 3, 4]}},
+        "balance_sheet": {"years": years[:3], "rows": {"Reserves": [10, 20, 30]}},
+        "cash_flow": {"years": [], "rows": {}},
+        "ratios": {"years": [], "rows": {}},
+    }
+
+
+class TestSnapshotStore:
+
+    @pytest.fixture
+    def store(self, tmp_path):
+        return SnapshotStore(tmp_path / "snap.db")
+
+    def test_identical_content_is_not_duplicated(self, store):
+        assert store.save("TCS", _payload([1, 2, 3, 4])) is True
+        assert store.save("TCS", _payload([1, 2, 3, 4])) is False
+        assert store.count() == 1
+
+    def test_price_change_alone_is_not_a_new_snapshot(self, store):
+        store.save("TCS", _payload([1, 2, 3, 4], price=100))
+        assert store.save("TCS", _payload([1, 2, 3, 4], price=250)) is False
+        assert content_hash(_payload([1], 1)) == content_hash(_payload([1], 2))
+
+    def test_as_of_returns_data_known_at_that_date(self, store):
+        t1 = datetime(2026, 4, 23, tzinfo=timezone.utc)
+        t2 = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        store.save("TCS", _payload([1, 2, 3, 4]), fetched_at=t1)
+        store.save("TCS", _payload([1, 2, 3, 9]), fetched_at=t2)
+
+        assert store.as_of("TCS", "2026-01-01") is None
+        assert store.as_of("TCS", "2026-06-30")["profit_loss"]["rows"]["Net Profit"][-1] == 4
+        assert store.as_of("TCS", "2026-12-31")["profit_loss"]["rows"]["Net Profit"][-1] == 9
+        assert [h["fetched_at"][:10] for h in store.history("TCS")] == ["2026-04-23", "2026-10-01"]
+
+    def test_backfill_is_idempotent_and_skips_empty_files(self, tmp_path):
+        cache = tmp_path / "screener"
+        cache.mkdir()
+        (cache / "TCS.json").write_text(json.dumps(_payload([1, 2, 3, 4])))
+        (cache / "EMPTY.json").write_text(json.dumps({}))
+        store = SnapshotStore(tmp_path / "snap.db")
+
+        assert backfill_from_cache(cache, store) == 1
+        assert backfill_from_cache(cache, store) == 0
+        assert store.symbols() == ["TCS"]
+
+
+class TestCompanyLoader:
+
+    @pytest.mark.parametrize("years, expected", [
+        (["Mar 2023", "Mar 2024", "TTM"], 2),
+        (["Mar 2023", "Mar 2024"], 2),
+        (["Mar 2024", "Mar 2025", "Sep 2025"], 2),        # ZOMATO-style interim column
+        (["Dec 2022", "Dec 2023", "TTM"], 2),             # December fiscal year
+        ([], 0),
+    ])
+    def test_full_year_cut(self, years, expected):
+        assert _full_year_cut(years) == expected
+
+    def test_each_statement_trimmed_on_its_own_columns(self):
+        cd = CompanyData("X", _payload([1, 2, 3, 4]))
+        assert cd.years("profit_loss") == ["Mar 2022", "Mar 2023", "Mar 2024"]
+        # The balance sheet has no TTM column, so its last year must survive.
+        assert cd.series("balance_sheet", "Reserves") == [10, 20, 30]
+        assert cd.ttm("profit_loss", "Net Profit") == 4
+
+    def test_aligned_keeps_gaps_series_drops_them(self):
+        cd = CompanyData("X", _payload([1, None, 3, 4]))
+        assert cd.aligned("profit_loss", "Net Profit") == [1, None, 3]
+        assert cd.series("profit_loss", "Net Profit") == [1, 3]
+
+    def test_first_present_key_wins(self):
+        raw = _payload([1, 2, 3, 4])
+        raw["balance_sheet"]["rows"]["Borrowing"] = [5, 6, 7]
+        cd = CompanyData("X", raw)
+        assert cd.series("balance_sheet", "Borrowings", "Borrowing") == [5, 6, 7]
+
+    def test_lender_classification(self):
+        assert CompanyData("HDFCBANK", {}).is_lender
+        assert CompanyData("HDFCLIFE", {}).is_insurer
+        assert not CompanyData("TCS", {}).is_lender
+
+    def test_load_missing_symbol_returns_none(self, tmp_path):
+        assert load_company("NOPE", cache_dir=tmp_path) is None
+
+
+class TestReportingLag:
+
+    @pytest.mark.parametrize("label, expected", [
+        ("Mar 2024", date(2024, 5, 31)),
+        ("Dec 2023", date(2024, 2, 29)),    # leap year
+        ("Oct 2023", date(2023, 12, 31)),
+        ("Nov 2023", date(2024, 1, 31)),
+        ("Mar 2016 15m", date(2016, 5, 31)),  # transition year after a fiscal year-end change
+        ("TTM", None),
+    ])
+    def test_available_date(self, label, expected):
+        assert fiscal_year_available_date(label) == expected
+
+
+class TestSectors:
+
+    def test_every_constituent_classified(self):
+        from config.nifty50_tickers import NIFTY50_TICKERS
+        from src.data.sectors import LABELS, PSU, SECTOR
+        assert set(NIFTY50_TICKERS) <= set(SECTOR)
+        assert set(SECTOR.values()) <= set(LABELS)
+        assert PSU <= set(SECTOR)
+
+    def test_unknown_symbol_is_default(self):
+        from src.data.sectors import sector_label, sector_of
+        assert sector_of("NOPE") == "DEFAULT" and sector_label("NOPE") == "Other"
+
+    def test_sectors_without_a_beta_use_the_default_beta(self):
+        from src.valuation.dcf_engine import _SECTOR_BETA, _sector_beta
+        assert _sector_beta("APOLLOHOSP") == _SECTOR_BETA["DEFAULT"]
+        assert _sector_beta("TCS") == _SECTOR_BETA["IT"]
+
+
+class TestAsOfView:
+
+    def test_year_appears_only_once_results_are_public(self):
+        cd = CompanyData("X", _payload([1, 2, 3, 4]))
+        assert cd.as_of(date(2024, 5, 30)).years("profit_loss") == ["Mar 2022", "Mar 2023"]
+        assert cd.as_of(date(2024, 5, 31)).years("profit_loss") == ["Mar 2022", "Mar 2023", "Mar 2024"]
+
+    def test_statements_trimmed_together_and_ttm_dropped(self):
+        view = CompanyData("X", _payload([1, 2, 3, 4])).as_of(date(2024, 1, 1))
+        assert view.series("profit_loss", "Net Profit") == [1, 2]
+        assert view.series("balance_sheet", "Reserves") == [10, 20]
+        assert view.ttm("profit_loss", "Net Profit") is None
+
+    def test_transition_year_does_not_truncate_later_years(self):
+        raw = _payload([1, 2, 3, 4])
+        raw["profit_loss"]["years"] = ["Dec 2021", "Mar 2023 15m", "Mar 2024", "TTM"]
+        view = CompanyData("X", raw).as_of(date(2024, 6, 1))
+        assert view.years("profit_loss") == ["Dec 2021", "Mar 2023 15m", "Mar 2024"]
+
+    def test_before_first_release_is_empty(self):
+        view = CompanyData("X", _payload([1, 2, 3, 4])).as_of(date(2020, 1, 1))
+        assert view.years("profit_loss") == []
+        assert view.series("profit_loss", "Net Profit") == []
+
+    def test_price_replaced_and_source_tagged(self):
+        view = CompanyData("X", _payload([1, 2, 3, 4], price=500.0)).as_of(date(2024, 6, 1), price=120.0)
+        assert view.current_price == 120.0
+        assert view.source == "as_of:2024-06-01"
+        assert CompanyData("X", _payload([1, 2, 3, 4], price=500.0)).as_of(date(2024, 6, 1)).current_price is None
+
+    def test_original_is_not_mutated(self):
+        cd = CompanyData("X", _payload([1, 2, 3, 4], price=500.0))
+        cd.as_of(date(2023, 1, 1), price=1.0)
+        assert cd.years("profit_loss") == ["Mar 2022", "Mar 2023", "Mar 2024"]
+        assert cd.ttm("profit_loss", "Net Profit") == 4
+        assert cd.current_price == 500.0
+
+    def test_scorer_historical_mode_never_reads_the_cache(self, monkeypatch):
+        from src.scoring import composite_score
+
+        def _no_cache(*args, **kwargs):
+            raise AssertionError("historical scoring fell back to the cache")
+
+        monkeypatch.setattr(composite_score, "load_company", _no_cache)
+        view = CompanyData("TCS", _payload([1, 2, 3, 4])).as_of(date(2024, 6, 1), price=100.0)
+        # INFY has no historical view: it must be skipped, not loaded from today's cache.
+        composite_score.CompositeScorer().score_all(["TCS", "INFY"], data={"TCS": view})

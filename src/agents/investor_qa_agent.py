@@ -53,7 +53,18 @@ class InvestorQAAgent:
             ticker:   Optional yfinance ticker (e.g. 'RELIANCE.NS') for stock-specific questions.
                       If not provided, the agent tries to detect the stock from the question.
         """
-        # Detect ticker from question if not provided
+        return self.ask_detailed(question, ticker)["answer"]
+
+    def ask_detailed(self, question: str, ticker: str = "") -> dict[str, Any]:
+        """
+        Answer a question and report how the answer was produced.
+
+        Order of preference, cheapest and most reliable first:
+          1. "concept"  — canned explanation of a general concept (no stock named)
+          2. "facts"    — a lookup answered from the company's fact sheet, no LLM
+          3. "llm"      — LLM reasoning, with the fact sheet and exact Screener
+                          figures as its primary context
+        """
         if not ticker:
             ticker = self._detect_ticker(question)
         if not ticker:
@@ -64,31 +75,54 @@ class InvestorQAAgent:
         if not ticker:
             faq_answer = self._check_faq(question)
             if faq_answer:
-                return faq_answer
+                return {"answer": faq_answer, "source": "concept", "symbol": None}
 
-        # Exact figures straight from Screener data — search is unreliable for specific years
-        facts = self.facts.for_question(question, ticker=ticker)
+        symbol = ticker.replace(".NS", "").replace(".BO", "") if ticker else ""
 
-        # Fetch relevant context if a stock was mentioned
+        sheet = None
+        if symbol:
+            try:
+                from src.services.research_service import get_service
+                sheet = get_service().fact_sheet(symbol)
+            except Exception as exc:
+                logger.warning(f"[InvestorQA] fact sheet unavailable for {symbol}: {exc}")
+
+        if sheet is not None:
+            from src.facts.answerer import answer_from_facts
+            direct = answer_from_facts(question, sheet)
+            if direct is not None:
+                logger.info(f"[InvestorQA] answered from fact sheet ({direct.metric})")
+                return {"answer": direct.text, "source": "facts", "symbol": symbol}
+
         context = ""
+        if sheet is not None:
+            context = sheet.to_context()
         if ticker:
-            sections = ["faq", "company_profile", "key_ratios", "screener_peers"]
-            if not facts:
-                # no verified figures available — fall back to the per-year statement chunks
-                sections += ["income_statement", "screener_profit_loss",
-                             "screener_ratios", "screener_balance_sheet"]
+            # Raw statement chunks and news supplement the fact sheet. The old
+            # LLM-pre-written "faq" section is deliberately not retrieved: those
+            # answers go stale on every data refresh and could carry invented
+            # numbers back in as if they were facts.
             results = self.retriever.retrieve_multi_section(
                 query=question,
                 ticker=ticker,
-                sections=sections,
-                top_k_per_section=2 if facts else 3,
+                sections=[
+                    "company_profile", "news",
+                    "screener_profit_loss", "screener_balance_sheet",
+                    "screener_cash_flow", "screener_ratios",
+                ],
+                top_k_per_section=2,
             )
-            context = self.retriever.format_context(results)
+            if results:
+                context += "\n\nSUPPORTING DOCUMENTS (lower priority than the fact sheet):\n"
+                context += self.retriever.format_context(results)
             logger.info(f"[InvestorQA] Retrieved {len(results)} chunks for {ticker}")
         else:
-            logger.info(f"[InvestorQA] Concept question — no stock retrieval")
+            logger.info("[InvestorQA] Concept question — no stock retrieval")
+
+        # Exact per-year figures straight from Screener data — search is unreliable for specific years
+        facts = self.facts.for_question(question, ticker=ticker)
         if facts:
-            context = f"{facts}\n\nBACKGROUND (may be approximate — figures above take precedence):\n{context}"
+            context = f"{facts}\n\nBACKGROUND (figures above take precedence):\n{context}"
 
         user_message = build_investor_qa_query(question, context=context, ticker=ticker)
         response = self.llm.complete(
@@ -96,13 +130,13 @@ class InvestorQAAgent:
             user_message=user_message,
             temperature=0.3,
         )
-        return response
+        return {"answer": response, "source": "llm", "symbol": symbol or None}
 
     def _check_faq(self, question: str) -> str:
         """Return a canned FAQ answer if the question is a close match."""
         q = question.lower().strip().rstrip("?").strip()
         for key, answer in INVESTOR_FAQ.items():
-            if key in q:
+            if key in q or q in key:
                 return answer
         return ""
 
@@ -113,10 +147,11 @@ class InvestorQAAgent:
         Returns yfinance ticker like 'RELIANCE.NS', or '' if none found.
         """
         q_lower = question.lower()
-        # Longest match wins (avoids "TCS" matching inside "TATACS")
+        # Whole-word matches only: a bare substring test sent "result" to LT and
+        # "below" to BEL. Longest match wins ("hdfc bank" over a shorter alias).
         matches: list[tuple[int, str]] = []
         for name_or_sym, symbol in _NAME_TO_SYMBOL.items():
-            if name_or_sym in q_lower:
+            if re.search(rf"(?<![a-z0-9]){re.escape(name_or_sym)}(?![a-z0-9])", q_lower):
                 matches.append((len(name_or_sym), symbol))
         if matches:
             matches.sort(reverse=True)

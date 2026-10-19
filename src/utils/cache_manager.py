@@ -7,7 +7,6 @@ and print a warning — but we never block a valuation run.
 """
 from __future__ import annotations
 
-import json
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -130,11 +129,12 @@ def refresh_stale(symbols: list[str], max_age_days: int = _STALE_DAYS, force: bo
     for i, sym in enumerate(targets, 1):
         print(f"  [{i}/{len(targets)}] {sym} ...", end="", flush=True)
         try:
+            # The fetcher saves the cache file (and a snapshot) itself, and only
+            # when the page actually had financial tables. Writing `data` here as
+            # well used to replace good cached data with {} on a blocked request.
             data = fetcher.fetch(sym)
-            out  = _CACHE_DIR / f"{sym}.json"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            with open(out, "w") as f:
-                json.dump(data, f, indent=2)
+            if not ScreenerFetcher._has_data(data):
+                raise RuntimeError("no financial tables returned; cached data kept")
             print(" ✓")
             ok += 1
         except Exception as exc:

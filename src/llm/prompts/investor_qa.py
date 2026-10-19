@@ -125,7 +125,17 @@ INVESTOR_FAQ: dict[str, str] = {
 def build_investor_qa_query(question: str, context: str = "", ticker: str = "") -> str:
     stock_note = f" about {ticker}" if ticker else ""
     context_block = f"\n\nKnowledge base data{stock_note}:\n{context}\n" if context else ""
+    grounding = ""
+    if "FACT SHEET" in context:
+        grounding = """
+Rules for numbers:
+- Every figure you state must appear in the FACT SHEET above. Quote it as written.
+- Do not calculate new figures yourself; the fact sheet already has the growth
+  rates, averages and peer comparisons.
+- If the fact sheet does not contain what the question needs, say that plainly
+  instead of estimating.
+- Mention any "Caveat:" line that bears on the answer."""
     return f"""{context_block}
 Investor question: {question}
-
+{grounding}
 Answer this question clearly and helpfully for a first-time Indian retail investor."""

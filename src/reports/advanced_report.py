@@ -9,6 +9,7 @@ from __future__ import annotations
 import re as _re
 from typing import Optional
 
+from src.data.sectors            import SECTOR, sector_label
 from src.valuation.dcf_engine    import DCFResult
 from src.scoring.composite_score import ScoreResult
 from src.data_pipeline.fetchers.fii_dii_fetcher import FlowSummary, FlowDay
@@ -52,6 +53,10 @@ def _money(v: Optional[float]) -> str:
 
 def _verdict_color(verdict: str) -> str:
     v = verdict.upper()
+    if "LIKELY UNDERVALUED" in v:              return _g(_b(verdict))
+    if "UNDERVALUED" in v:                     return _g(verdict)
+    if "FAIRLY" in v:                          return _y(verdict)
+    if "OVERVALUED" in v:                      return _r(verdict)
     if "STRONG BUY"  in v or "TOP PICK" in v: return _g(_b(verdict))
     if "BUY"         in v:                     return _g(verdict)
     if "HOLD"        in v:                     return _y(verdict)
@@ -262,7 +267,7 @@ def print_dcf_sensitivity(result: "DCFResult") -> None:
         print(row)
 
     print("  " + "─" * (14 + CW * len(tg_steps) + 2))
-    print(_d("  Green = STRONG BUY / BUY  |  Yellow = HOLD  |  Red = SELL / STRONG SELL"))
+    print(_d("  Green = undervalued (P > 60%)  |  Yellow = fairly valued  |  Red = overvalued (P < 40%)"))
     print(_d(f"  Base WACC={wacc_base*100:.1f}%  |  Base Terminal G={tg_base*100:.1f}%  "
              f"|  FCF CAGR={result.fcf_cagr*100:+.1f}%"))
     print()
@@ -512,26 +517,7 @@ def print_portfolio_table(result: PortfolioResult) -> None:
 #  TABLE 5 — SECTOR PEER RANKING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_SECTOR_MAP: dict[str, str] = {
-    "HDFCBANK":"Banking", "ICICIBANK":"Banking", "SBIN":"Banking",
-    "AXISBANK":"Banking", "KOTAKBANK":"Banking", "INDUSINDBK":"Banking",
-    "TCS":"IT", "INFY":"IT", "HCLTECH":"IT", "WIPRO":"IT", "TECHM":"IT",
-    "HINDUNILVR":"FMCG", "ITC":"FMCG", "NESTLEIND":"FMCG",
-    "BRITANNIA":"FMCG", "TATACONSUM":"FMCG", "TITAN":"FMCG", "ASIANPAINT":"FMCG",
-    "SUNPHARMA":"Pharma", "DRREDDY":"Pharma", "CIPLA":"Pharma",
-    "MARUTI":"Auto", "TATAMOTORS":"Auto", "M&M":"Auto",
-    "BAJAJ-AUTO":"Auto", "EICHERMOT":"Auto", "HEROMOTOCO":"Auto",
-    "RELIANCE":"Energy", "ONGC":"Energy", "BPCL":"Energy",
-    "NTPC":"Energy", "POWERGRID":"Energy", "COALINDIA":"Energy",
-    "TATASTEEL":"Metals", "JSWSTEEL":"Metals", "HINDALCO":"Metals",
-    "LT":"Infra", "ADANIENT":"Infra", "ADANIPORTS":"Infra", "BEL":"Infra",
-    "ULTRACEMCO":"Cement", "GRASIM":"Cement",
-    "BHARTIARTL":"Telecom",
-    "BAJFINANCE":"Fin-Serv", "BAJAJFINSV":"Fin-Serv",
-    "SHRIRAMFIN":"Fin-Serv",
-    "HDFCLIFE":"Insurance", "SBILIFE":"Insurance",
-    "APOLLOHOSP":"Healthcare", "ZOMATO":"Consumer Tech",
-}
+_SECTOR_MAP: dict[str, str] = {sym: sector_label(sym) for sym in SECTOR}
 
 def print_sector_ranking(score_results: list[ScoreResult]) -> None:
     score_map = {r.symbol: r for r in score_results}
